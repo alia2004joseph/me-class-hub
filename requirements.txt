@@ -2,3 +2,5 @@ google-genai
 pandas
 requests
 streamlit
+openpyxl
+fsspec
