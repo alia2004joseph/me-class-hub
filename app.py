@@ -1,50 +1,50 @@
 import streamlit as st
-# Import our modular backend + interfaces
+
+# ── Page config MUST be first Streamlit call ─────────────────
+st.set_page_config(
+    page_title="ME Class Hub",
+    page_icon="⚙️",
+    layout="centered"
+)
+
+# ── Imports ──────────────────────────────────────────────────
 from database import SheetDatabaseManager
 from ai_engine import AISortingEngine
+from ai_engine import AIStudyAssistant
 from student import render_student_interface
 from class_rep import render_class_rep_interface
 
-
-
-# Quick test to confirm Streamlit runs
 st.write("✅ The app is designed by ALIA JOSEPH")
 
+# ── Instantiate managers ─────────────────────────────────────
+db       = SheetDatabaseManager()
+ai       = AISortingEngine()       # used by class rep for group allocation
+ai_study = AIStudyAssistant()      # used by students for AI study assistant
 
-# ---------------------------
-# App Configuration
-# ---------------------------
-st.set_page_config(page_title="ME Class Hub", page_icon="⚙️", layout="centered")
-
-# Instantiate managers
-db = SheetDatabaseManager()   # ✅ Consistent backend connector
-ai = AISortingEngine()
-
-# Session state handlers
+# ── Session state ─────────────────────────────────────────────
 if "role" not in st.session_state:
     st.session_state.role = "Student"
+
 if "show_success_message" in st.session_state:
     st.success(f"🎉 Welcome aboard, {st.session_state['show_success_message']}! Profile created.")
     del st.session_state["show_success_message"]
 
-# ---------------------------
-# Sidebar Access Controls
-# ---------------------------
+# ── Sidebar ───────────────────────────────────────────────────
 st.sidebar.title("🔐 Access Control")
-st.session_state.role = st.sidebar.radio("Identify your role:", ["Student", "Class Rep"])
+st.session_state.role = st.sidebar.radio(
+    "Identify your role:", ["Student", "Class Rep"]
+)
 
 st.title("⚙️ MECHANICAL ENGINEERING APP")
 
-# ---------------------------
-# Navigation Tabs
-# ---------------------------
+# ── Navigation Tabs ───────────────────────────────────────────
 tab1, tab2 = st.tabs(["📋 Student Portal", "👑 Class Rep Dashboard"])
 
-# Live database records fetch
+# Fetch roster once — shared across both interfaces
 df_profiles = db.fetch_roster()
 
 with tab1:
-    render_student_interface(db, df_profiles)   # ✅ Student portal
+    render_student_interface(db, ai_study, df_profiles)
 
 with tab2:
-    render_class_rep_interface(db, ai, df_profiles)   # ✅ Class Rep dashboard
+    render_class_rep_interface(db, ai, df_profiles)
