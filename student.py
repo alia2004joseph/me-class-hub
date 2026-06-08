@@ -1,6 +1,6 @@
 import streamlit as st
 from database import SheetDatabaseManager
-from cache import cached_fetch_feedback
+from cache import cached_fetch_feedback, cached_fetch_rep_replies
 
 
 # ─────────────────────────────────────────
@@ -237,13 +237,15 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
     if st.session_state.student_logged_in:
         student_data = df_profiles[df_profiles["Reg Number"] == st.session_state.student_logged_in].iloc[0]
 
-        announcements  = db.fetch_announcements()
-        materials_list = db.fetch_materials()
-
         s_name   = student_data["Student Name"]
-        s_reg    = st.session_state.student_logged_in
+        s_reg    = st.session_state.student_logged_in                   # ✅ defined first
         s_course = student_data.get("Course Code", "N/A")
         s_group  = student_data.get("Assigned Group", "Not Assigned")
+
+        announcements  = db.fetch_announcements()
+        materials_list = db.fetch_materials()
+        my_rep_replies    = db.fetch_rep_replies(reg_number=s_reg)      # ✅ now works
+        unread_rep_count  = sum(1 for r in my_rep_replies if r.get("read_status", "Unread").lower() == "unread")
 
         # Count unread
         unread = []
@@ -278,14 +280,23 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
             activity_items += f'<div class="activity-item">{unread_count} unread announcement(s)</div>'
         if new_materials:
             activity_items += f'<div class="activity-item">{new_materials} material(s) available</div>'
+        if unread_rep_count:
+            activity_items += f'<div class="activity-item">{unread_rep_count} new reply/replies from Class Rep</div>'
         if activity_items:
             st.markdown(f'<div class="activity-strip"><div class="act-title">🔔 Recent Activity</div>{activity_items}</div>', unsafe_allow_html=True)
         else:
             st.success("✅ Everything is up to date.")
 
         # Tab Navigation
-        tabs = ["🏠 Home", "🔔 Notices", "📚 Materials", "👥 My Group", "✉️ Message", "👤 Profile", "🤖 AI Assistant"]
-        tab_labels = [f"🔔 Notices ({unread_count})" if t == "🔔 Notices" and unread_count > 0 else t for t in tabs]
+        tabs = ["🏠 Home", "🔔 Notices", "📚 Materials", "👥 My Group", "✉️ Message", "💬 Rep Replies", "👤 Profile", "🤖 AI Assistant"]
+        tab_labels = []
+        for t in tabs:
+            if t == "🔔 Notices" and unread_count > 0:
+                tab_labels.append(f"🔔 Notices ({unread_count})")
+            elif t == "💬 Rep Replies" and unread_rep_count > 0:
+                tab_labels.append(f"💬 Rep Replies ({unread_rep_count})")
+            else:
+                tab_labels.append(t)
 
         default_tab_index = 0
         if st.session_state.go_to_home:
@@ -474,6 +485,56 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
                         st.warning("Please type a message before sending.")
 
         # ════════════════════════════════════════
+        # 💬 REP REPLIES
+        # ════════════════════════════════════════
+        elif active_tab == "💬 Rep Replies":
+            st.markdown('<div class="sec-header"><span class="sec-title">💬 Messages from Class Rep</span></div>', unsafe_allow_html=True)
+
+            if unread_rep_count > 0:
+                st.info(f"📬 You have **{unread_rep_count} unread** message(s) from your Class Rep.")
+            elif my_rep_replies:
+                st.success("✅ All messages read.")
+
+            if my_rep_replies:
+                for ridx, reply in enumerate(my_rep_replies):
+                    r_time   = reply.get("timestamp", "N/A")
+                    r_rep    = reply.get("rep_name", "Class Rep")
+                    r_msg    = reply.get("message", "")
+                    r_status = reply.get("read_status", "Unread")
+                    is_read  = r_status.lower() == "read"
+
+                    left_col   = "#16a34a" if is_read else "#3b82f6"
+                    card_bg    = "#f0fdf4" if is_read else "#eff6ff"
+                    border_col = "#86efac" if is_read else "#93c5fd"
+                    read_label = "👁️ Read" if is_read else "🔵 New"
+                    new_badge  = "" if is_read else '<span style="background:#3b82f6;color:white;font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:10px;margin-left:6px;">NEW</span>'
+
+                    st.markdown(f"""
+                    <div style="background:{card_bg};border:1px solid {border_col};
+                        border-left:4px solid {left_col};border-radius:12px;
+                        padding:14px 18px;margin-bottom:10px;">
+                        <div style="font-size:0.75rem;color:#64748b;margin-bottom:6px;">
+                            👑 <strong>{r_rep}</strong>{new_badge} &nbsp;·&nbsp; 🕐 {r_time}
+                            &nbsp;·&nbsp; <span style="color:{left_col};font-weight:600;">{read_label}</span>
+                        </div>
+                        <div style="font-size:0.92rem;color:#1e293b;line-height:1.6;">{r_msg}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if not is_read:
+                        if st.button("✅ Mark as Read", key=f"rep_read_{ridx}_{r_time[:10]}"):
+                            with st.spinner("Marking as read..."):
+                                ok = db.mark_rep_reply_read(timestamp=r_time, reg_number=s_reg)
+                            if ok:
+                                cached_fetch_rep_replies.clear()
+                                st.rerun()
+                            else:
+                                st.error("❌ Could not update. Please try again.")
+                    st.markdown('<div style="margin-bottom:4px;"></div>', unsafe_allow_html=True)
+            else:
+                st.info("No messages from your Class Rep yet.")
+
+        # ════════════════════════════════════════
         # 👤 PROFILE
         # ════════════════════════════════════════
         elif active_tab == "👤 Profile":
@@ -541,7 +602,7 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
                                 st.session_state.ai_pdf_text = extract_pdf_text(file_url, file_name)
                         if not st.session_state.ai_summary_shown:
                             with st.spinner("✍️ Generating summary..."):
-                                summary = ai_study.summarize_material(st.session_state.ai_pdf_text, file_name)
+                                summary = ai_study.summarize_material(st.session_state.ai_pdf_text, file_name, student_reg=s_reg)
                             st.markdown(f'<div class="ann-card" style="margin-bottom:16px;"><span class="ann-badge badge-normal">📋 SUMMARY</span><div class="ann-text">{summary}</div></div>', unsafe_allow_html=True)
                             st.session_state.ai_summary_shown = True
                             st.session_state.ai_chat_history.append({"role": "assistant", "content": f"Summary of {file_name}:\n{summary}"})
@@ -575,7 +636,8 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
                                 question     = user_question.strip(),
                                 chat_history = st.session_state.ai_chat_history,
                                 pdf_text     = st.session_state.ai_pdf_text,
-                                file_name    = st.session_state.ai_selected_file
+                                file_name    = st.session_state.ai_selected_file,
+                                student_reg  = s_reg
                             )
                         st.session_state.ai_chat_history.append({"role": "user",      "content": user_question.strip()})
                         st.session_state.ai_chat_history.append({"role": "assistant", "content": answer})
@@ -595,4 +657,8 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
                         "confirm_clear_all", "go_to_home"]:
                 if key in st.session_state:
                     del st.session_state[key]
+            # Clear any per-student AI cooldown keys
+            keys_to_delete = [k for k in st.session_state if k.startswith("ai_last_request_")]
+            for k in keys_to_delete:
+                del st.session_state[k]
             st.rerun()

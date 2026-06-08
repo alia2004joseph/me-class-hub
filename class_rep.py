@@ -6,7 +6,7 @@ from database import SheetDatabaseManager
 from cache import cached_fetch_materials, cached_fetch_announcements, cached_fetch_feedback, cached_fetch_rep_replies
 
 
-def render_class_rep_interface(db: SheetDatabaseManager, ai, df_profiles):
+def render_class_rep_interface(db: SheetDatabaseManager, ai, ai_rep, df_profiles):
 
     # ── Access control ────────────────────────────────────────
     if st.session_state.role != "Class Rep":
@@ -495,7 +495,123 @@ def render_class_rep_interface(db: SheetDatabaseManager, ai, df_profiles):
     st.markdown("---")
 
     # ═════════════════════════════════════════════════════════
-    # SECTION 8: REP SENT REPLIES OVERVIEW
+    # SECTION 8: AI REP ASSISTANT
+    # ═════════════════════════════════════════════════════════
+    st.subheader("🤖 AI Rep Assistant")
+    with st.expander("🤖 Open AI Assistant Panel", expanded=False):
+
+        # Session state for AI rep
+        if "rep_ai_tab" not in st.session_state:
+            st.session_state.rep_ai_tab = "📢 Draft Announcement"
+
+        ai_rep_tabs = st.radio(
+            "Choose AI Task:",
+            ["📢 Draft Announcement", "💬 Suggest Reply", "📊 Summarize Feedback",
+             "📅 Format Timetable", "🔍 Check Conflicts"],
+            horizontal=True,
+            key="rep_ai_radio"
+        )
+
+        st.markdown("---")
+
+        # ── Draft Announcement ────────────────────
+        if ai_rep_tabs == "📢 Draft Announcement":
+            st.markdown("**📢 AI Announcement Drafter**")
+            st.caption("Type a rough idea and AI will write a professional announcement for you.")
+            rough_idea     = st.text_area("Rough idea:", placeholder="e.g., tell students lab is tomorrow at 8am in block C", key="rep_ai_ann_idea", height=80)
+            ann_priority   = st.selectbox("Priority:", ["Normal", "Urgent"], key="rep_ai_ann_priority")
+            if st.button("✍️ Draft Announcement", key="rep_ai_draft_btn"):
+                if rough_idea.strip():
+                    with st.spinner("AI is drafting..."):
+                        drafted = ai_rep.draft_announcement(rough_idea.strip(), ann_priority)
+                    st.markdown("**✅ Drafted Announcement:**")
+                    st.text_area("Copy this to post:", value=drafted, height=200, key="rep_ai_drafted_output")
+                    st.caption("👆 Copy the text above and paste it into the Announcements section to post.")
+                else:
+                    st.warning("Please enter a rough idea first.")
+
+        # ── Suggest Reply ────────────────────────
+        elif ai_rep_tabs == "💬 Suggest Reply":
+            st.markdown("**💬 AI Reply Suggester**")
+            st.caption("Paste a student message and AI will suggest a professional reply.")
+            reply_student_name = st.text_input("Student name:", placeholder="e.g., John Doe", key="rep_ai_reply_name")
+            reply_student_msg  = st.text_area("Student message:", placeholder="Paste the student's message here...", key="rep_ai_reply_msg", height=100)
+            if st.button("💬 Suggest Reply", key="rep_ai_reply_btn"):
+                if reply_student_msg.strip():
+                    with st.spinner("AI is generating a reply..."):
+                        suggested = ai_rep.suggest_reply(
+                            reply_student_name.strip() or "Student",
+                            reply_student_msg.strip()
+                        )
+                    st.markdown("**✅ Suggested Reply:**")
+                    st.text_area("Copy this to send:", value=suggested, height=150, key="rep_ai_reply_output")
+                    st.caption("👆 Copy and paste into the Reply box in the Feedback Inbox above.")
+                else:
+                    st.warning("Please paste the student's message first.")
+
+        # ── Summarize Feedback ───────────────────
+        elif ai_rep_tabs == "📊 Summarize Feedback":
+            st.markdown("**📊 AI Feedback Summarizer**")
+            st.caption("AI reads all student messages and gives you a summary report.")
+            if st.button("📊 Generate Feedback Report", key="rep_ai_fb_btn"):
+                with st.spinner("AI is analyzing feedback..."):
+                    feedback_data = db.fetch_feedback()
+                    report        = ai_rep.summarize_feedback(feedback_data)
+                st.markdown(report)
+
+        # ── Format Timetable ─────────────────────
+        elif ai_rep_tabs == "📅 Format Timetable":
+            st.markdown("**📅 AI Timetable Formatter**")
+            st.caption("Type your raw timetable info and AI will format it into a clean announcement.")
+            raw_tt = st.text_area(
+                "Raw timetable info:",
+                placeholder="e.g., Monday 8am-10am Thermodynamics Block A Room 201, Monday 10am-12pm Fluid Mechanics Block B ...",
+                key="rep_ai_tt_raw",
+                height=120
+            )
+            col_fmt, col_chk = st.columns(2)
+            with col_fmt:
+                if st.button("📅 Format Timetable", key="rep_ai_tt_fmt_btn"):
+                    if raw_tt.strip():
+                        with st.spinner("AI is formatting..."):
+                            formatted_tt = ai_rep.format_timetable(raw_tt.strip())
+                        st.markdown("**✅ Formatted Timetable:**")
+                        st.text_area("Copy this to post:", value=formatted_tt, height=250, key="rep_ai_tt_output")
+                        st.caption("👆 Copy and post this as an announcement so students can see it.")
+                    else:
+                        st.warning("Please enter timetable information first.")
+            with col_chk:
+                if st.button("🔍 Check for Conflicts", key="rep_ai_tt_chk_btn"):
+                    if raw_tt.strip():
+                        with st.spinner("AI is checking for conflicts..."):
+                            conflict_report = ai_rep.check_timetable_conflicts(raw_tt.strip())
+                        st.markdown("**🔍 Conflict Report:**")
+                        st.markdown(conflict_report)
+                    else:
+                        st.warning("Please enter timetable information first.")
+
+        # ── Check Conflicts ──────────────────────
+        elif ai_rep_tabs == "🔍 Check Conflicts":
+            st.markdown("**🔍 AI Timetable Conflict Checker**")
+            st.caption("Paste your timetable and AI will find any clashes or issues.")
+            conflict_tt = st.text_area(
+                "Paste timetable to check:",
+                placeholder="Paste your full timetable here...",
+                key="rep_ai_conflict_tt",
+                height=150
+            )
+            if st.button("🔍 Check Timetable", key="rep_ai_conflict_btn"):
+                if conflict_tt.strip():
+                    with st.spinner("AI is checking..."):
+                        result = ai_rep.check_timetable_conflicts(conflict_tt.strip())
+                    st.markdown(result)
+                else:
+                    st.warning("Please paste your timetable first.")
+
+    st.markdown("---")
+
+    # ═════════════════════════════════════════════════════════
+    # SECTION 9: REP SENT REPLIES OVERVIEW
     # ═════════════════════════════════════════════════════════
     st.subheader("📤 Sent Replies Overview")
     with st.expander("📤 View All Replies Sent to Students", expanded=False):

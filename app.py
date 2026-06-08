@@ -11,6 +11,7 @@ st.set_page_config(
 from database import SheetDatabaseManager
 from ai_engine import AISortingEngine
 from ai_engine import AIStudyAssistant
+from ai_engine import AIRepAssistant
 from student import render_student_interface
 from class_rep import render_class_rep_interface
 
@@ -20,6 +21,7 @@ st.write("✅ The app is designed by ALIA JOSEPH")
 db       = SheetDatabaseManager()
 ai       = AISortingEngine()       # used by class rep for group allocation
 ai_study = AIStudyAssistant()      # used by students for AI study assistant
+ai_rep   = AIRepAssistant()        # used by class rep for AI admin features
 
 # ── Session state ─────────────────────────────────────────────
 if "role" not in st.session_state:
@@ -47,4 +49,4 @@ with tab1:
     render_student_interface(db, ai_study, df_profiles)
 
 with tab2:
-    render_class_rep_interface(db, ai, df_profiles)
+    render_class_rep_interface(db, ai, ai_rep, df_profiles)
