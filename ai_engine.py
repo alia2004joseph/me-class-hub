@@ -1,5 +1,5 @@
 """
-ai_engine.py — Multi-provider AI engine for MEC Student Portal.
+ai_engine.py — Multi-provider AI engine for Smart University App.
 
 Features:
   1. Gemini multi-key rotation (quota safe)
@@ -9,12 +9,13 @@ Features:
   5. Strict academic system prompts
   6. AIStudyAssistant for students
   7. AIRepAssistant for Class Rep dashboard
+  8. AISortingEngine for group allocation
 """
 
 import time
 import streamlit as st
 import requests
-import fitz  # PyMuPDF — pip install pymupdf
+import fitz  # PyMuPDF
 import pandas as pd
 import json
 from google import genai
@@ -32,11 +33,10 @@ STUDENT_COOLDOWN_SECONDS = 30
 # SYSTEM PROMPTS
 # ─────────────────────────────────────────────
 STUDENT_SYSTEM_PROMPT = (
-    "You are a dedicated academic study assistant for university students "
-    "in the Mechanical Engineering department. "
+    "You are a dedicated academic study assistant for university students. "
     "Your primary role is to help students understand their uploaded course materials. "
     "When a document is provided, base your answers STRICTLY on that document. "
-    "For general academic questions (engineering, physics, mathematics), "
+    "For general academic questions (engineering, physics, mathematics, science), "
     "use your full academic knowledge but keep answers focused on university-level study. "
     "Do NOT answer questions about sports, entertainment, current events, or non-academic topics. "
     "Always give COMPLETE, detailed answers. Use clear structure."
@@ -47,6 +47,13 @@ REP_SYSTEM_PROMPT = (
     "You help the Class Rep manage their duties efficiently: drafting announcements, suggesting replies, "
     "summarizing feedback, formatting timetables, and checking conflicts. "
     "Always be professional, clear, and concise."
+)
+
+ADMIN_SYSTEM_PROMPT = (
+    "You are an intelligent university administrative assistant helping a Super Admin "
+    "manage multiple departments and year groups. "
+    "Provide clear, structured, data-driven insights. "
+    "Be concise and professional."
 )
 
 # ─────────────────────────────────────────────
@@ -128,8 +135,7 @@ def try_cloudflare(contents, token, account_id):
 # ─────────────────────────────────────────────
 # FALLBACK MANAGER
 # ─────────────────────────────────────────────
-def _call_with_retry(model: str, contents: str, config, max_retries: int = None) -> str:
-    # 1. Gemini
+def _call_with_retry(model: str, contents: str, config) -> str:
     if _key_manager.has_keys():
         try:
             return try_gemini(model, contents, config)
@@ -139,7 +145,6 @@ def _call_with_retry(model: str, contents: str, config, max_retries: int = None)
             else:
                 print(f"[Gemini error] {e}")
 
-    # 2. Groq
     groq_key = st.secrets.get("GROQ_API_KEY", "")
     if groq_key:
         try:
@@ -147,7 +152,6 @@ def _call_with_retry(model: str, contents: str, config, max_retries: int = None)
         except Exception as e:
             print(f"[Groq error] {e}")
 
-    # 3. Mistral
     mistral_key = st.secrets.get("MISTRAL_API_KEY", "")
     if mistral_key:
         try:
@@ -155,7 +159,6 @@ def _call_with_retry(model: str, contents: str, config, max_retries: int = None)
         except Exception as e:
             print(f"[Mistral error] {e}")
 
-    # 4. HuggingFace
     hf_token = st.secrets.get("HUGGINGFACE_TOKEN", "")
     if hf_token:
         try:
@@ -163,8 +166,7 @@ def _call_with_retry(model: str, contents: str, config, max_retries: int = None)
         except Exception as e:
             print(f"[HF error] {e}")
 
-    # 5. Cloudflare
-    cf_token = st.secrets.get("CLOUDFLARE_TOKEN", "")
+    cf_token   = st.secrets.get("CLOUDFLARE_TOKEN", "")
     cf_account = st.secrets.get("CLOUDFLARE_ACCOUNT_ID", "")
     if cf_token and cf_account:
         try:
@@ -192,42 +194,35 @@ def extract_pdf_text(url: str, file_name: str) -> str:
         return ""
 
 # ─────────────────────────────────────────────────────────────
-# AI SORTING ENGINE — Group Allocation for Class Rep
+# AI SORTING ENGINE — Group Allocation
 # ─────────────────────────────────────────────────────────────
 class AISortingEngine:
-    """Manages the engineering group allocation logic using Gemini."""
-
-    def generate_teams(self, df_profiles: pd.DataFrame, team_size: int, instructions: str) -> dict:
+    def generate_teams(
+        self,
+        df_profiles: pd.DataFrame,
+        team_size: int,
+        instructions: str
+    ) -> dict:
         if not _key_manager.has_keys():
             return {"error": "No API keys found in secrets.toml."}
-
         try:
-            clean_roster = df_profiles[["Student Name", "Reg Number", "Course Code"]].to_json(orient="records")
+            clean_roster = df_profiles[
+                ["Student Name", "Reg Number", "Course Code"]
+            ].to_json(orient="records")
 
             prompt = (
                 f"You are an academic project coordinator. Group the following student list into balanced teams "
                 f"of approximately {team_size} members. Mix students from different course codes if possible.\n"
                 f"Custom Constraints: {instructions}\n"
                 f"Student Data Array: {clean_roster}\n\n"
-                f"CRITICAL: You must return the output as a valid raw JSON object. "
-                f"Do not include markdown blocks like ```json. "
-                f"The JSON object must map every student's 'Reg Number' to their newly assigned group name.\n"
-                f"Example format:\n"
-                f'{{"25/U/0001/PS": "Team Alpha", "25/U/0002/PS": "Team Beta"}}\n'
+                f"CRITICAL: Return a valid raw JSON object mapping every student's 'Reg Number' to their group name.\n"
+                f"Example: {{\"25/U/0001/PS\": \"Team Alpha\", \"25/U/0002/PS\": \"Team Beta\"}}\n"
             )
-
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-
+            config = types.GenerateContentConfig(response_mime_type="application/json")
             result = _call_with_retry(ALLOC_MODEL, prompt, config)
-
-            # If it returned an error string, pass it through
-            if result.startswith("⚠️") or result.startswith("⏳"):
+            if result.startswith("⚠️"):
                 return {"error": result}
-
             return json.loads(result)
-
         except Exception as e:
             return {"error": str(e)}
 
@@ -236,68 +231,44 @@ class AISortingEngine:
 # AI STUDY ASSISTANT — For Students
 # ─────────────────────────────────────────────────────────────
 class AIStudyAssistant:
-    """
-    Gemini-powered study assistant for MEC students.
-    Features:
-    - Summarize uploaded course materials
-    - Answer questions strictly from selected PDF
-    - General academic Q&A for engineering topics
-    - Per-student cooldown to prevent quota exhaustion
-    """
 
     def _check_cooldown(self, student_reg: str) -> tuple[bool, int]:
         key       = f"ai_last_request_{student_reg}"
         last_time = st.session_state.get(key, 0)
         elapsed   = time.time() - last_time
         if elapsed < STUDENT_COOLDOWN_SECONDS:
-            remaining = int(STUDENT_COOLDOWN_SECONDS - elapsed)
-            return False, remaining
+            return False, int(STUDENT_COOLDOWN_SECONDS - elapsed)
         return True, 0
 
     def _record_request(self, student_reg: str):
         st.session_state[f"ai_last_request_{student_reg}"] = time.time()
 
-    def summarize_material(self, pdf_text: str, file_name: str, student_reg: str = "") -> str:
-        """Generate a complete structured summary of the selected material."""
+    def summarize_material(
+        self, pdf_text: str, file_name: str, student_reg: str = ""
+    ) -> str:
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         if not pdf_text.strip():
-            return (
-                "⚠️ Could not extract text from this PDF. "
-                "It may be a scanned image or a protected file."
-            )
-
+            return "⚠️ Could not extract text from this PDF."
         if student_reg:
-            can_proceed, remaining = self._check_cooldown(student_reg)
-            if not can_proceed:
-                return f"⏳ Please wait {remaining} seconds before making another request."
+            ok, wait = self._check_cooldown(student_reg)
+            if not ok:
+                return f"⏳ Please wait {wait} seconds before making another request."
             self._record_request(student_reg)
 
         prompt = (
-            f"Please provide a COMPLETE and detailed summary of the academic document titled '{file_name}'. "
-            f"Do NOT cut off the summary — cover everything in the document.\n\n"
-            f"Structure your summary exactly as follows:\n\n"
+            f"Provide a COMPLETE and detailed summary of '{file_name}'.\n\n"
             f"## 📘 Summary of '{file_name}'\n\n"
             f"### 1. Main Topic\n"
-            f"What is this document about? Give a clear overview.\n\n"
             f"### 2. Key Concepts\n"
-            f"List ALL important concepts, theories, and principles covered.\n\n"
             f"### 3. Important Formulas & Definitions\n"
-            f"List every formula, equation, or definition mentioned.\n\n"
             f"### 4. Chapter/Section Breakdown\n"
-            f"Summarize each major section or topic in the document.\n\n"
-            f"### 5. Study Tips\n"
-            f"Give 2-3 practical tips for understanding and remembering this material.\n\n"
+            f"### 5. Study Tips\n\n"
             f"Document content:\n{pdf_text}"
         )
-
         config = types.GenerateContentConfig(
             system_instruction=STUDENT_SYSTEM_PROMPT,
-            temperature=0.3,
-            max_output_tokens=3000,
-        )
-
+            temperature=0.3, max_output_tokens=3000)
         return _call_with_retry(STUDENT_MODEL, prompt, config)
 
     def ask_ai(
@@ -308,104 +279,76 @@ class AIStudyAssistant:
         file_name: str = "",
         student_reg: str = ""
     ) -> str:
-        """Answer a student question with optional PDF context and chat history."""
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         if student_reg:
-            can_proceed, remaining = self._check_cooldown(student_reg)
-            if not can_proceed:
-                return f"⏳ Please wait {remaining} seconds before sending another question."
+            ok, wait = self._check_cooldown(student_reg)
+            if not ok:
+                return f"⏳ Please wait {wait} seconds."
             self._record_request(student_reg)
 
         context_block = ""
         if pdf_text.strip():
             context_block = (
-                f"The student has selected the following course material: '{file_name}'.\n"
-                f"Base your answer PRIMARILY on this document:\n\n"
+                f"Selected material: '{file_name}'.\n"
                 f"--- DOCUMENT START ---\n{pdf_text}\n--- DOCUMENT END ---\n\n"
             )
-
         history_block = ""
         if chat_history:
             for turn in chat_history[-6:]:
-                role           = "Student" if turn["role"] == "user" else "Assistant"
+                role = "Student" if turn["role"] == "user" else "Assistant"
                 history_block += f"{role}: {turn['content']}\n"
             history_block = f"Previous conversation:\n{history_block}\n"
 
         full_prompt = (
-            f"{context_block}"
-            f"{history_block}"
+            f"{context_block}{history_block}"
             f"Student question: {question}\n\n"
-            f"Provide a COMPLETE answer. Do not cut off mid-response."
+            f"Provide a COMPLETE answer."
         )
-
         config = types.GenerateContentConfig(
             system_instruction=STUDENT_SYSTEM_PROMPT,
-            temperature=0.4,
-            max_output_tokens=3000,
-        )
-
+            temperature=0.4, max_output_tokens=3000)
         return _call_with_retry(STUDENT_MODEL, full_prompt, config)
 
-    def find_formula(self, topic: str, pdf_text: str, file_name: str, student_reg: str = "") -> str:
-        """Find and explain formulas related to a topic from the uploaded material."""
+    def find_formula(
+        self, topic: str, pdf_text: str, file_name: str, student_reg: str = ""
+    ) -> str:
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         if student_reg:
-            can_proceed, remaining = self._check_cooldown(student_reg)
-            if not can_proceed:
-                return f"⏳ Please wait {remaining} seconds before making another request."
+            ok, wait = self._check_cooldown(student_reg)
+            if not ok:
+                return f"⏳ Please wait {wait} seconds."
             self._record_request(student_reg)
 
         prompt = (
-            f"From the document '{file_name}', find ALL formulas and equations related to: '{topic}'.\n\n"
-            f"For each formula found:\n"
-            f"1. Write the formula clearly\n"
-            f"2. Define every variable/symbol\n"
-            f"3. Explain when and how to use it\n"
-            f"4. Give a simple example if possible\n\n"
-            f"If no formula is found in the document, say so clearly and explain the concept instead.\n\n"
+            f"From '{file_name}', find ALL formulas related to: '{topic}'.\n"
+            f"For each: write formula, define variables, explain usage, give example.\n\n"
             f"Document:\n{pdf_text}"
         )
-
         config = types.GenerateContentConfig(
             system_instruction=STUDENT_SYSTEM_PROMPT,
-            temperature=0.2,
-            max_output_tokens=2000,
-        )
-
+            temperature=0.2, max_output_tokens=2000)
         return _call_with_retry(STUDENT_MODEL, prompt, config)
 
     def explain_concept(self, concept: str, student_reg: str = "") -> str:
-        """Explain an engineering concept clearly without needing a PDF."""
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         if student_reg:
-            can_proceed, remaining = self._check_cooldown(student_reg)
-            if not can_proceed:
-                return f"⏳ Please wait {remaining} seconds before making another request."
+            ok, wait = self._check_cooldown(student_reg)
+            if not ok:
+                return f"⏳ Please wait {wait} seconds."
             self._record_request(student_reg)
 
         prompt = (
-            f"Explain the following engineering/academic concept clearly for a university student:\n\n"
+            f"Explain this concept for a university student:\n\n"
             f"Concept: {concept}\n\n"
-            f"Structure your explanation:\n"
-            f"1. Simple definition (1-2 sentences)\n"
-            f"2. Detailed explanation\n"
-            f"3. Key formulas or principles involved\n"
-            f"4. Real-world example or application\n"
-            f"5. Common mistakes students make\n"
+            f"1. Simple definition\n2. Detailed explanation\n"
+            f"3. Key formulas\n4. Real-world example\n5. Common mistakes\n"
         )
-
         config = types.GenerateContentConfig(
             system_instruction=STUDENT_SYSTEM_PROMPT,
-            temperature=0.4,
-            max_output_tokens=2000,
-        )
-
+            temperature=0.4, max_output_tokens=2000)
         return _call_with_retry(STUDENT_MODEL, prompt, config)
 
 
@@ -413,174 +356,175 @@ class AIStudyAssistant:
 # AI REP ASSISTANT — For Class Representative
 # ─────────────────────────────────────────────────────────────
 class AIRepAssistant:
-    """
-    Gemini-powered assistant for the Class Representative.
-    Features:
-    - Draft professional announcements
-    - Suggest replies to student messages
-    - Summarize student feedback inbox
-    - Format timetable data into clean announcements
-    - Check timetable for conflicts/clashes
-    """
 
     def draft_announcement(self, rough_idea: str, priority: str = "Normal") -> str:
-        """Turn a rough idea into a professional class announcement."""
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         prompt = (
-            f"You are helping a university Class Representative draft a professional announcement.\n\n"
-            f"Priority level: {priority}\n"
-            f"Rough idea from rep: \"{rough_idea}\"\n\n"
-            f"Write a complete, professional class announcement that:\n"
-            f"- Has a clear subject/heading\n"
-            f"- Is formal but friendly in tone\n"
-            f"- Includes all relevant details from the rough idea\n"
-            f"- Is appropriate for a university student audience\n"
-            f"- {'Uses urgent language and ALL CAPS for key info' if priority == 'Urgent' else 'Uses a calm, informative tone'}\n\n"
-            f"Return ONLY the announcement text, ready to post."
+            f"Help a Class Rep draft a professional announcement.\n"
+            f"Priority: {priority}\nIdea: \"{rough_idea}\"\n\n"
+            f"Write a complete, formal announcement ready to post. Return ONLY the text."
         )
-
         config = types.GenerateContentConfig(
             system_instruction=REP_SYSTEM_PROMPT,
-            temperature=0.5,
-            max_output_tokens=1000,
-        )
-
+            temperature=0.5, max_output_tokens=1000)
         return _call_with_retry(REP_MODEL, prompt, config)
 
     def suggest_reply(self, student_name: str, student_message: str) -> str:
-        """Suggest a professional reply to a student's feedback message."""
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         prompt = (
-            f"A university Class Representative needs to reply to this student message.\n\n"
-            f"Student name: {student_name}\n"
-            f"Student message: \"{student_message}\"\n\n"
-            f"Write a professional, empathetic, and helpful reply that:\n"
-            f"- Addresses the student by name\n"
-            f"- Acknowledges their concern or question\n"
-            f"- Provides a helpful response or next steps\n"
-            f"- Is friendly but professional\n"
-            f"- Is concise (3-5 sentences)\n\n"
-            f"Return ONLY the reply text, ready to send."
+            f"A Class Rep needs to reply to:\n"
+            f"Student: {student_name}\nMessage: \"{student_message}\"\n\n"
+            f"Write a professional, empathetic reply (3-5 sentences). Return ONLY the reply."
         )
-
         config = types.GenerateContentConfig(
             system_instruction=REP_SYSTEM_PROMPT,
-            temperature=0.5,
-            max_output_tokens=500,
-        )
-
+            temperature=0.5, max_output_tokens=500)
         return _call_with_retry(REP_MODEL, prompt, config)
 
     def summarize_feedback(self, feedback_list: list) -> str:
-        """Analyze all student feedback and give the rep a summary report."""
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         if not feedback_list:
             return "📭 No feedback messages to summarize."
-
         messages_text = ""
         for i, fb in enumerate(feedback_list[:20], 1):
             if isinstance(fb, list) and len(fb) >= 5:
                 messages_text += f"{i}. [{fb[2]}]: {fb[4]}\n"
-
         prompt = (
-            f"Analyze these student feedback messages sent to the Class Representative "
-            f"and provide a structured summary report.\n\n"
+            f"Analyze these student feedback messages and provide a structured summary.\n\n"
             f"Messages:\n{messages_text}\n\n"
-            f"Your report should include:\n"
-            f"## 📊 Feedback Summary Report\n\n"
-            f"### Common Issues\n"
-            f"What are the most frequently raised problems or questions?\n\n"
-            f"### Urgent Matters\n"
-            f"Are there any messages that seem urgent or need immediate attention?\n\n"
-            f"### General Sentiment\n"
-            f"What is the overall mood/sentiment of students?\n\n"
-            f"### Recommended Actions\n"
-            f"What should the Class Rep prioritize responding to or acting on?\n"
+            f"## 📊 Feedback Summary\n"
+            f"### Common Issues\n### Urgent Matters\n### General Sentiment\n### Recommended Actions\n"
         )
-
         config = types.GenerateContentConfig(
             system_instruction=REP_SYSTEM_PROMPT,
-            temperature=0.3,
-            max_output_tokens=1500,
-        )
-
+            temperature=0.3, max_output_tokens=1500)
         return _call_with_retry(REP_MODEL, prompt, config)
 
     def format_timetable(self, raw_timetable: str) -> str:
-        """Format raw timetable text into a clean structured announcement."""
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         prompt = (
-            f"Format the following raw timetable information into a clean, "
-            f"well-structured class timetable announcement.\n\n"
-            f"Raw timetable info:\n{raw_timetable}\n\n"
-            f"Format it as a proper timetable with:\n"
-            f"- A clear heading\n"
-            f"- Organized by day of the week\n"
-            f"- Each entry showing: Day | Time | Course | Venue\n"
-            f"- Easy to read on a phone screen\n"
-            f"- A note at the bottom about any important reminders\n\n"
-            f"Return the formatted timetable ready to post as an announcement."
+            f"Format this raw timetable into a clean, structured announcement.\n\n"
+            f"Raw:\n{raw_timetable}\n\n"
+            f"Format: Day | Time | Course | Venue. Easy to read on mobile. Return ready-to-post text."
         )
-
         config = types.GenerateContentConfig(
             system_instruction=REP_SYSTEM_PROMPT,
-            temperature=0.2,
-            max_output_tokens=1500,
-        )
-
+            temperature=0.2, max_output_tokens=1500)
         return _call_with_retry(REP_MODEL, prompt, config)
 
     def check_timetable_conflicts(self, raw_timetable: str) -> str:
-        """Check a timetable for scheduling conflicts, clashes, or issues."""
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         prompt = (
-            f"Carefully analyze this class timetable for scheduling problems.\n\n"
-            f"Timetable:\n{raw_timetable}\n\n"
-            f"Check for:\n"
-            f"1. Time clashes — two classes at the same time\n"
-            f"2. Venue conflicts — same room booked twice at the same time\n"
-            f"3. Back-to-back classes with no break\n"
-            f"4. Unusual scheduling (e.g. classes at odd hours)\n"
-            f"5. Missing information (courses with no venue or time)\n\n"
-            f"## 🔍 Timetable Conflict Report\n\n"
-            f"List each issue found clearly. If no conflicts found, confirm the timetable looks clean."
+            f"Check this timetable for: time clashes, venue conflicts, back-to-back classes, "
+            f"unusual hours, missing info.\n\nTimetable:\n{raw_timetable}\n\n"
+            f"## 🔍 Conflict Report\nList each issue. If none, confirm it looks clean."
         )
-
         config = types.GenerateContentConfig(
             system_instruction=REP_SYSTEM_PROMPT,
-            temperature=0.2,
-            max_output_tokens=1000,
-        )
-
+            temperature=0.2, max_output_tokens=1000)
         return _call_with_retry(REP_MODEL, prompt, config)
 
     def answer_timetable_question(self, question: str, timetable_text: str) -> str:
-        """Answer a student question about the timetable."""
         if not _key_manager.has_keys():
-            return "⚠️ No API keys found in secrets.toml."
-
+            return "⚠️ No API keys found."
         prompt = (
-            f"A student is asking about the class timetable.\n\n"
             f"Timetable:\n{timetable_text}\n\n"
             f"Student question: {question}\n\n"
-            f"Answer clearly and directly based strictly on the timetable above. "
-            f"If the answer cannot be found in the timetable, say so politely."
+            f"Answer directly from the timetable. If not found, say so politely."
         )
-
         config = types.GenerateContentConfig(
             system_instruction=REP_SYSTEM_PROMPT,
-            temperature=0.3,
-            max_output_tokens=500,
-        )
+            temperature=0.3, max_output_tokens=500)
+        return _call_with_retry(REP_MODEL, prompt, config)
 
+
+# ─────────────────────────────────────────────────────────────
+# AI ADMIN ASSISTANT — For Super Admin
+# ─────────────────────────────────────────────────────────────
+class AIAdminAssistant:
+    """AI assistant for the Super Admin dashboard."""
+
+    def summarize_all_feedback(self, feedback_list: list, dept: str = "ALL") -> str:
+        if not _key_manager.has_keys():
+            return "⚠️ No API keys found."
+        if not feedback_list:
+            return "📭 No feedback to summarize."
+
+        scope = f"department {dept}" if dept != "ALL" else "all departments"
+        messages_text = ""
+        for i, fb in enumerate(feedback_list[:30], 1):
+            if isinstance(fb, list) and len(fb) >= 5:
+                messages_text += f"{i}. [{fb[2]} | {fb[3] if len(fb)>5 else ''}]: {fb[4]}\n"
+
+        prompt = (
+            f"As a university admin, analyze feedback from {scope}.\n\n"
+            f"Messages:\n{messages_text}\n\n"
+            f"## 📊 University-Wide Feedback Analysis\n"
+            f"### Top Issues Across Departments\n"
+            f"### Departments Needing Attention\n"
+            f"### Overall Student Sentiment\n"
+            f"### Recommended Admin Actions\n"
+        )
+        config = types.GenerateContentConfig(
+            system_instruction=ADMIN_SYSTEM_PROMPT,
+            temperature=0.3, max_output_tokens=2000)
+        return _call_with_retry(REP_MODEL, prompt, config)
+
+    def generate_broadcast(self, rough_idea: str, priority: str = "Normal") -> str:
+        if not _key_manager.has_keys():
+            return "⚠️ No API keys found."
+        prompt = (
+            f"Draft a university-wide broadcast announcement.\n"
+            f"Priority: {priority}\nIdea: \"{rough_idea}\"\n\n"
+            f"This will go to ALL departments and year groups. "
+            f"Make it formal, clear, and appropriately scoped. Return ONLY the text."
+        )
+        config = types.GenerateContentConfig(
+            system_instruction=ADMIN_SYSTEM_PROMPT,
+            temperature=0.4, max_output_tokens=800)
+        return _call_with_retry(REP_MODEL, prompt, config)
+
+    def analyze_enrollment(self, df: pd.DataFrame) -> str:
+        if not _key_manager.has_keys():
+            return "⚠️ No API keys found."
+        if df.empty:
+            return "No enrollment data available."
+
+        # Normalise column names defensively before groupby
+        df = df.copy()
+        df.columns = [c.strip() for c in df.columns]
+        col_map = {}
+        for c in df.columns:
+            if c.lower() in ("department", "dept", "dep"):
+                col_map[c] = "Department"
+            elif c.lower() in ("year", "year_group", "year of study"):
+                col_map[c] = "Year"
+        df = df.rename(columns=col_map)
+
+        if "Department" not in df.columns:
+            df["Department"] = "Unknown"
+        if "Year" not in df.columns:
+            df["Year"] = "Unknown"
+
+        summary = df.groupby(["Department", "Year"]).size().reset_index(name="Count")
+        summary_text = summary.to_string(index=False)
+
+        prompt = (
+            f"Analyze this university enrollment data and provide insights.\n\n"
+            f"Enrollment by Department and Year:\n{summary_text}\n\n"
+            f"Provide:\n"
+            f"1. Which dept/year has the most students\n"
+            f"2. Which has the least (may need attention)\n"
+            f"3. Overall enrollment health\n"
+            f"4. Any notable patterns\n"
+            f"Keep it concise and actionable for an admin."
+        )
+        config = types.GenerateContentConfig(
+            system_instruction=ADMIN_SYSTEM_PROMPT,
+            temperature=0.3, max_output_tokens=800)
         return _call_with_retry(REP_MODEL, prompt, config)
