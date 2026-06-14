@@ -15,7 +15,7 @@ from ai_engine  import AISortingEngine, AIStudyAssistant, AIRepAssistant, AIAdmi
 from student    import render_student_interface
 from class_rep  import render_class_rep_interface
 from Superadmin import render_superadmin_interface
-from config     import DEPARTMENTS
+from config     import get_departments
 
 # ── Shared managers ───────────────────────────────────────────
 db       = SheetDatabaseManager()
@@ -74,7 +74,7 @@ with st.sidebar:
     <div style="font-size:0.7rem;letter-spacing:2px;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:10px;">Departments</div>
     """, unsafe_allow_html=True)
 
-    for code, info in DEPARTMENTS.items():
+    for code, info in get_departments().items():
         st.markdown(f"""
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <div style="width:10px;height:10px;border-radius:50%;background:{info['color']};flex-shrink:0;"></div>

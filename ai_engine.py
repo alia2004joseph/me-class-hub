@@ -66,14 +66,16 @@ class KeyRotationManager:
 
     def _load_keys(self) -> list:
         keys = []
+        # Try both naming conventions
         for i in range(1, 10):
-            key = st.secrets.get(f"GEMINI_KEY_{i}", "")
+            key = st.secrets.get(f"GEMINI_KEY_{i}", "") or                   st.secrets.get(f"GEMINI_API_KEY_{i}", "")
             if key:
                 keys.append(key)
         if not keys:
-            old_key = st.secrets.get("GEMINI_API_KEY", "")
-            if old_key:
-                keys.append(old_key)
+            # Final fallback
+            key = st.secrets.get("GEMINI_API_KEY", "")
+            if key:
+                keys.append(key)
         return keys
 
     def get_client(self):
@@ -188,7 +190,7 @@ def extract_pdf_text(url: str, file_name: str) -> str:
         pdf_doc = fitz.open(stream=response.content, filetype="pdf")
         text = "".join([page.get_text() for page in pdf_doc])
         pdf_doc.close()
-        return text[:20000].strip()
+        return text[:12000].strip()
     except Exception as e:
         print(f"[ai_engine] PDF extract error for {file_name}: {e}")
         return ""

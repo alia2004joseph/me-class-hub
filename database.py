@@ -15,6 +15,7 @@ from cache import (
     cached_fetch_file,
     cached_fetch_rep_replies,
     cached_fetch_reps,
+    cached_fetch_timetable,
     WEBHOOK_URL,
     EMPTY_COLUMNS,
 )
@@ -31,7 +32,7 @@ class SheetDatabaseManager:
 
     def register_student(
         self, name: str, reg: str, code: str,
-        contact: str, dept: str, year: str
+        contact: str, dept: str, year: str,pin: str = None
     ) -> bool:
         parts = name.strip().split()
         if len(parts) >= 2:
@@ -50,6 +51,7 @@ class SheetDatabaseManager:
             "assigned_group": "Unassigned",
             "department":     dept.strip().upper(),
             "year":           year.strip(),
+            "pin":            pin
         }
         try:
             ok = requests.post(self.webhook_url, json=payload, timeout=15).status_code == 200
@@ -321,3 +323,192 @@ class SheetDatabaseManager:
 
     def fetch_all_announcements(self) -> list:
         return cached_fetch_announcements(dept="ALL", year="ALL")
+
+
+    # ── Department Management ─────────────────────────────────
+    def fetch_departments(self) -> list:
+        try:
+            r = requests.get(f"{self.webhook_url}?action=getDepartments", timeout=10)
+            if r.status_code == 200:
+                return r.json()
+            return []
+        except:
+            return []
+
+    def add_department(
+        self, code: str, name: str,
+        color: str, light: str, courses: str
+    ) -> bool:
+        try:
+            ok = requests.post(self.webhook_url, json={
+                "action":  "addDepartment",
+                "code":    code.strip().upper(),
+                "name":    name.strip(),
+                "color":   color.strip(),
+                "light":   light.strip(),
+                "courses": courses.strip().upper(),
+            }, timeout=15).status_code == 200
+            if ok:
+                from config import load_departments
+                load_departments.clear()
+            return ok
+        except:
+            return False
+
+    def update_department(
+        self, code: str, name: str,
+        color: str, light: str, courses: str
+    ) -> bool:
+        try:
+            ok = requests.post(self.webhook_url, json={
+                "action":  "updateDepartment",
+                "code":    code.strip().upper(),
+                "name":    name.strip(),
+                "color":   color.strip(),
+                "light":   light.strip(),
+                "courses": courses.strip().upper(),
+            }, timeout=15).status_code == 200
+            if ok:
+                from config import load_departments
+                load_departments.clear()
+            return ok
+        except:
+            return False
+
+    def delete_department(self, code: str) -> dict:
+        """
+        Delete a department. GAS will block if students are registered.
+        Returns {status, message, student_count}
+        """
+        try:
+            r = requests.post(self.webhook_url, json={
+                "action": "deleteDepartment",
+                "code":   code.strip().upper(),
+            }, timeout=15)
+            if r.status_code == 200:
+                result = r.json()
+                if result.get("status") == "success":
+                    from config import load_departments
+                    load_departments.clear()
+                return result
+            return {"status": "error", "message": "Server error"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def update_contact(self, reg_number: str, new_contact: str) -> bool:
+        """Update a student's contact number in the Roster sheet."""
+        try:
+            ok = requests.post(self.webhook_url, json={
+                "action":      "updateContact",
+                "reg_number":  reg_number.strip().upper(),
+                "new_contact": new_contact.strip(),
+            }, timeout=15).status_code == 200
+            if ok:
+                cached_fetch_roster.clear()
+            return ok
+        except:
+            return False
+
+    # ── Student PIN Authentication ────────────────────────────
+    def verify_student(self, reg_number: str, pin: str) -> dict:
+        """
+        Verify student login credentials.
+        Returns {status, profile, pin_set} on success.
+        pin_set=False means student has no PIN yet (first login).
+        """
+        try:
+            r = requests.post(self.webhook_url, json={
+                "action":     "verifyStudent",
+                "reg_number": reg_number.strip().upper(),
+                "pin":        pin.strip(),
+            }, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            return {"status": "error", "message": "Server error"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def set_pin(self, reg_number: str, new_pin: str) -> bool:
+        """Set or update a student's PIN."""
+        try:
+            ok = requests.post(self.webhook_url, json={
+                "action":     "setPin",
+                "reg_number": reg_number.strip().upper(),
+                "new_pin":    new_pin.strip(),
+            }, timeout=15).status_code == 200
+            if ok:
+                cached_fetch_roster.clear()
+            return ok
+        except:
+            return False
+
+    def reset_pin(self, reg_number: str, contact: str, new_pin: str) -> dict:
+        """Reset PIN by verifying reg number + contact number."""
+        try:
+            r = requests.post(self.webhook_url, json={
+                "action":     "resetPin",
+                "reg_number": reg_number.strip().upper(),
+                "contact":    contact.strip(),
+                "new_pin":    new_pin.strip(),
+            }, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            return {"status": "error", "message": "Server error"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    # ── Timetable ─────────────────────────────────────────────
+    def fetch_timetable(self, dept: str = "ALL", year: str = "ALL") -> list:
+        return cached_fetch_timetable(dept=dept, year=year)
+
+    def add_timetable_entry(
+        self, dept: str, year: str,
+        day: str, time: str, course: str,
+        lecturer: str = "", color: str = "",
+        entry_type: str = "Weekly"
+    ) -> bool:
+        try:
+            ok = requests.post(self.webhook_url, json={
+                "action":   "addTimetableEntry",
+                "dept":     dept.strip().upper(),
+                "year":     year.strip(),
+                "day":      day.strip(),
+                "time":     time.strip(),
+                "course":   course.strip().upper(),
+                "lecturer": lecturer.strip(),
+                "color":    color.strip(),
+                "type":     entry_type.strip(),
+            }, timeout=15).status_code == 200
+            if ok: cached_fetch_timetable.clear()
+            return ok
+        except:
+            return False
+
+    def delete_timetable_entry(
+        self, dept: str, year: str,
+        day: str, time: str
+    ) -> bool:
+        try:
+            ok = requests.post(self.webhook_url, json={
+                "action": "deleteTimetableEntry",
+                "dept":   dept.strip().upper(),
+                "year":   year.strip(),
+                "day":    day.strip(),
+                "time":   time.strip(),
+            }, timeout=15).status_code == 200
+            if ok: cached_fetch_timetable.clear()
+            return ok
+        except:
+            return False
+
+    def clear_timetable(self, dept: str, year: str) -> bool:
+        try:
+            ok = requests.post(self.webhook_url, json={
+                "action": "clearTimetable",
+                "dept":   dept.strip().upper(),
+                "year":   year.strip(),
+            }, timeout=15).status_code == 200
+            if ok: cached_fetch_timetable.clear()
+            return ok
+        except:
+            return False

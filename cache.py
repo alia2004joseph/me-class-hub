@@ -20,7 +20,7 @@ WEBHOOK_URL = (
 EMPTY_COLUMNS = [
     "Timestamp", "Student Name", "Reg Number",
     "Course Code", "Contact", "Assigned Group",
-    "Department", "Year"
+    "Department", "Year", "Pin"
 ]
 
 TTL_ROSTER        = 120   # 2 min
@@ -30,6 +30,7 @@ TTL_FEEDBACK      = 45    # 45 sec
 TTL_FILE          = 3600  # 1 hour
 TTL_REP_REPLIES   = 45    # 45 sec
 TTL_REPS          = 60    # 1 min — rep accounts change infrequently
+TTL_TIMETABLE     = 300   # 5 min — timetable rarely changes
 
 # ─────────────────────────────────────────────────────────────
 # PERSISTENT HTTP SESSION
@@ -58,6 +59,7 @@ _last_good: dict = {
     "feedback":      {},
     "rep_replies":   {},
     "reps":          None,
+    "timetable":     {},
 }
 
 def _get(url: str, timeout: int = 15):
@@ -204,6 +206,26 @@ def cached_fetch_rep_replies(
     except Exception as e:
         print(f"[cache] Rep replies fetch error: {e}")
         return _last_good["rep_replies"].get((dept, year)) or []
+
+
+@st.cache_data(ttl=TTL_TIMETABLE, show_spinner=False)
+def cached_fetch_timetable(dept: str = "ALL", year: str = "ALL") -> list:
+    """Fetch timetable entries scoped by dept+year."""
+    try:
+        url = f"{WEBHOOK_URL}?action=getTimetable"
+        if dept != "ALL": url += f"&dept={dept}"
+        if year != "ALL": url += f"&year={year}"
+        r = _get(url)
+        if r.status_code == 200:
+            out = r.json()
+            if isinstance(out, list):
+                _last_good["timetable"][(dept, year)] = out
+                return out
+        cached = _last_good["timetable"].get((dept, year))
+        return cached if cached is not None else []
+    except Exception as e:
+        print(f"[cache] Timetable fetch error: {e}")
+        return _last_good["timetable"].get((dept, year)) or []
 
 
 @st.cache_data(ttl=TTL_REPS, show_spinner=False)

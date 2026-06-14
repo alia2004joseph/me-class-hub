@@ -6,7 +6,7 @@ Rep sees only their dept+year data. Includes Change Password feature.
 import streamlit as st
 from database import SheetDatabaseManager
 from ai_engine import AISortingEngine, AIRepAssistant
-from config import DEPARTMENTS, YEARS, dept_color, dept_light, dept_name, dept_courses
+from config import get_departments, YEARS, dept_color, dept_light, dept_name, dept_courses
 
 
 def inject_rep_css(primary: str, light: str):
@@ -84,7 +84,7 @@ def render_class_rep_interface(
         st.subheader("🔐 Class Rep Login")
         st.info("Your login is managed by your department admin. Contact them if you cannot log in.")
 
-        dept_options  = {f"{v['name']} ({k})": k for k, v in DEPARTMENTS.items()}
+        dept_options  = {f"{v['name']} ({k})": k for k, v in get_departments().items()}
         dept_label    = st.selectbox("Your Department", list(dept_options.keys()), key="rep_login_dept")
         selected_dept = dept_options[dept_label]
         selected_year = st.selectbox("Your Year Group", YEARS, key="rep_login_year")
@@ -153,8 +153,8 @@ def render_class_rep_interface(
     # ── Tabs ─────────────────────────────────────────────────
     tabs = st.tabs([
         "👥 Roster", "🏷️ Groups", "📢 Notices",
-        "📚 Materials", "📬 Feedback", "💬 Replies",
-        "🤖 AI Tools", "⚙️ Settings"
+        "📚 Materials", "📅 Timetable", "📬 Feedback",
+        "💬 Replies", "🤖 AI Tools", "⚙️ Settings"
     ])
 
     # ════════════════════════════════════════
@@ -176,6 +176,16 @@ def render_class_rep_interface(
             st.dataframe(df_show, use_container_width=True)
             st.caption(f"Showing {len(df_show)} of {total_students} students")
 
+            # Export to CSV
+            csv = df_show.to_csv(index=False)
+            st.download_button(
+                "⬇️ Export Class List to CSV",
+                data=csv,
+                file_name=f"{r_dept}_{r_year.replace(' ','_')}_students.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
             st.markdown("#### 🗑️ Delete Student")
             del_name = st.selectbox(
                 "Select student",
@@ -190,6 +200,34 @@ def render_class_rep_interface(
                         st.rerun()
                     else:
                         st.error(f"❌ {result.get('message', 'Error')}")
+
+            st.markdown("---")
+            st.markdown("#### 🔐 Reset Student PIN")
+            st.caption("Use this if a student is locked out and cannot reset their PIN themselves.")
+            reset_sel = st.selectbox(
+                "Select student to reset PIN",
+                ["— Select —"] + list(df_class["Student Name"].values),
+                key="reset_pin_sel"
+            )
+            if reset_sel != "— Select —":
+                new_pin_rep = st.text_input(
+                    "New PIN for student", type="password",
+                    max_chars=6, key="rep_reset_pin_input",
+                    placeholder="4-digit PIN"
+                )
+                if st.button("🔐 Reset PIN", key="rep_reset_pin_btn"):
+                    if not new_pin_rep or not new_pin_rep.isdigit() or len(new_pin_rep) < 4:
+                        st.error("❌ PIN must be at least 4 digits.")
+                    else:
+                        reg_row = df_class[df_class["Student Name"] == reset_sel]
+                        if not reg_row.empty:
+                            reg = reg_row.iloc[0]["Reg Number"]
+                            with st.spinner("Resetting..."):
+                                ok = db.set_pin(reg, new_pin_rep)
+                            if ok:
+                                st.success(f"✅ PIN reset for {reset_sel}. Share the new PIN with them securely.")
+                            else:
+                                st.error("❌ Reset failed.")
 
     # ════════════════════════════════════════
     # 🏷️ GROUPS
@@ -352,10 +390,189 @@ def render_class_rep_interface(
         else:
             st.info("No materials uploaded yet.")
 
+
+    # ════════════════════════════════════════
+    # 📅 TIMETABLE
+    # ════════════════════════════════════════
+    with tabs[4]:
+        st.markdown("### 📅 Class Timetable")
+        st.info(f"Timetable for **{d_name} — {r_year}**. Students see this in their portal.")
+
+        # Auto-colour palette — assigned by course name hash
+        TT_PALETTE = [
+            "#1a56db","#16a34a","#ea580c","#7c3aed",
+            "#dc2626","#db2777","#0d9488","#b45309",
+            "#0284c7","#4338ca","#e11d48","#475569"
+        ]
+        TT_LIGHTS = [
+            "#dbeafe","#dcfce7","#ffedd5","#ede9fe",
+            "#fee2e2","#fce7f3","#ccfbf1","#fef3c7",
+            "#e0f2fe","#e0e7ff","#ffe4e6","#f1f5f9"
+        ]
+
+        def auto_color(course_name):
+            """Deterministically assign a colour based on course name."""
+            idx = sum(ord(c) for c in course_name.upper()) % len(TT_PALETTE)
+            return TT_PALETTE[idx], TT_LIGHTS[idx]
+
+        timetable = db.fetch_timetable(dept=r_dept, year=r_year)
+
+        # ── Add entry manually ───────────────────────────────
+        st.markdown("#### ➕ Add Entry")
+        with st.form("add_tt_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                tt_day      = st.selectbox("Day", ["Monday","Tuesday","Wednesday",
+                                                    "Thursday","Friday","Saturday","Sunday"])
+                tt_time     = st.text_input("Time", placeholder="e.g. 8:00 AM")
+            with c2:
+                tt_course   = st.text_input("Course Code / Name", placeholder="e.g. BMEC 2101")
+                tt_lecturer = st.text_input("Lecturer Name",       placeholder="e.g. Dr. Okello")
+
+            tt_type = st.radio("Session Type", ["Weekly","One-off"], horizontal=True,
+                               help="Weekly = every week | One-off = single special session")
+
+            if st.form_submit_button("➕ Add Entry", use_container_width=True):
+                if not tt_time or not tt_course:
+                    st.warning("Please fill in Day, Time and Course at minimum.")
+                else:
+                    # Auto-assign colour based on course name
+                    c_hex, c_light = auto_color(tt_course)
+                    with st.spinner("Saving..."):
+                        ok = db.add_timetable_entry(
+                            r_dept, r_year, tt_day,
+                            tt_time, tt_course, tt_lecturer,
+                            color=c_hex, entry_type=tt_type
+                        )
+                    if ok:
+                        st.success(f"✅ Added: {tt_day} {tt_time} — {tt_course}")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to add entry.")
+
+        st.markdown("---")
+
+        # ── AI parse from raw text ───────────────────────────
+        st.markdown("#### 🤖 Import from Raw Text")
+        with st.expander("Paste raw timetable text and let AI parse it"):
+            raw_tt = st.text_area("Paste timetable here:", height=150,
+                placeholder="e.g. Monday 8am BMEC, Tuesday 10am BBPE...")
+            if st.button("🤖 Parse & Import with AI", key="parse_tt_btn"):
+                if not raw_tt.strip():
+                    st.warning("Please paste some timetable text.")
+                else:
+                    with st.spinner("Parsing..."):
+                        import json as _json
+                        from ai_engine import _call_with_retry
+                        from google.genai import types as _types
+                        prompt = (
+                            "Parse this timetable text into a JSON array. "
+                            "Each item must have: day, time, course, lecturer, type. "
+                            "Days must be full names (Monday, Tuesday etc). "
+                            "type must be Weekly or One-off. "
+                            "lecturer can be empty string if not mentioned. "
+                            "Return ONLY raw JSON array, no markdown.\n\n"
+                            "Timetable: " + raw_tt
+                        )
+                        config = _types.GenerateContentConfig(
+                            response_mime_type="application/json"
+                        )
+                        result = _call_with_retry("models/gemini-2.5-flash", prompt, config)
+                        try:
+                            entries = _json.loads(result)
+                            added = 0
+                            for entry in entries:
+                                day    = entry.get("day","").strip()
+                                time   = entry.get("time","").strip()
+                                course = entry.get("course","").strip()
+                                if day and time and course:
+                                    lecturer   = entry.get("lecturer","").strip()
+                                entry_type = entry.get("type","Weekly").strip()
+                                c_hex, _   = auto_color(course)
+                                if db.add_timetable_entry(
+                                    r_dept, r_year, day, time,
+                                    course, lecturer, c_hex, entry_type
+                                ):
+                                        added += 1
+                            st.success(f"✅ Imported {added} entries!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Could not parse: {e}")
+
+        st.markdown("---")
+
+        # ── View & delete entries ────────────────────────────
+        st.markdown("#### 📋 Current Timetable")
+
+        if not timetable:
+            st.info("No timetable entries yet.")
+        else:
+            # Group by day
+            day_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            by_day    = {}
+            for entry in timetable:
+                d = entry.get("day","Other")
+                by_day.setdefault(d, []).append(entry)
+
+            for day in day_order:
+                if day not in by_day:
+                    continue
+                st.markdown(f"**{day}**")
+                entries = sorted(by_day[day], key=lambda x: x.get("time",""))
+                for eidx, entry in enumerate(entries):
+                    c1, c2 = st.columns([5,1])
+                    with c1:
+                        e_color    = entry.get('color','') or primary
+                        e_lcolor,_ = auto_color(entry.get('course',''))
+                        e_color    = e_color if e_color else e_lcolor
+                        lect_str   = (
+                            '<span style="color:#475569;font-size:0.82rem;font-weight:600;">'
+                            + "👨‍🏫 " + entry.get("lecturer","").title() + "</span>"
+                        ) if entry.get("lecturer") else ""
+                        type_badge = f"<span style=\"background:#f1f5f9;color:#64748b;font-size:0.65rem;font-weight:700;padding:1px 7px;border-radius:8px;margin-left:6px;\">{entry.get('type','Weekly')}</span>"
+                        st.markdown(f"""
+                        <div style="background:white;border-radius:10px;padding:10px 16px;
+                            margin-bottom:6px;border:1px solid #e2e8f7;
+                            border-left:4px solid {e_color};">
+                            <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;">
+                                <span style="font-weight:800;color:{e_color};min-width:90px;">{entry.get('time','')}</span>
+                                <span style="color:#1e293b;font-weight:600;">{entry.get('course','')}</span>
+                                {type_badge}
+                            </div>
+                            <div style="margin-top:3px;">{lect_str}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with c2:
+                        if st.button("🗑️", key=f"del_tt_{day}_{eidx}"):
+                            with st.spinner("Deleting..."):
+                                ok = db.delete_timetable_entry(
+                                    r_dept, r_year, day, entry.get("time","")
+                                )
+                            if ok: st.rerun()
+
+            st.markdown("---")
+            if st.button("🗑️ Clear Entire Timetable", type="secondary"):
+                st.session_state["confirm_clear_tt"] = True
+                st.rerun()
+
+            if st.session_state.get("confirm_clear_tt"):
+                st.warning("⚠️ Delete ALL timetable entries for this class?")
+                ca, cb = st.columns(2)
+                with ca:
+                    if st.button("✅ Yes, clear all", key="yes_clear_tt"):
+                        with st.spinner("Clearing..."):
+                            db.clear_timetable(r_dept, r_year)
+                        st.session_state["confirm_clear_tt"] = False
+                        st.rerun()
+                with cb:
+                    if st.button("❌ Cancel", key="no_clear_tt"):
+                        st.session_state["confirm_clear_tt"] = False
+                        st.rerun()
+
     # ════════════════════════════════════════
     # 📬 FEEDBACK
     # ════════════════════════════════════════
-    with tabs[4]:
+    with tabs[5]:
         st.markdown("### 📬 Student Feedback Inbox")
         if not feedback_list:
             st.info("No feedback messages yet.")
@@ -431,7 +648,7 @@ def render_class_rep_interface(
     # ════════════════════════════════════════
     # 💬 REPLIES
     # ════════════════════════════════════════
-    with tabs[5]:
+    with tabs[6]:
         st.markdown("### 💬 Sent Replies Overview")
         if not rep_replies:
             st.info("No replies sent yet.")
@@ -460,7 +677,7 @@ def render_class_rep_interface(
     # ════════════════════════════════════════
     # 🤖 AI TOOLS
     # ════════════════════════════════════════
-    with tabs[6]:
+    with tabs[7]:
         st.markdown("### 🤖 AI Rep Tools")
         tool = st.radio("Select tool:", [
             "📅 Format Timetable",
@@ -496,7 +713,7 @@ def render_class_rep_interface(
     # ════════════════════════════════════════
     # ⚙️ SETTINGS
     # ════════════════════════════════════════
-    with tabs[7]:
+    with tabs[8]:
         st.markdown("### ⚙️ Account Settings")
         st.markdown(f"""
         <div style="background:white;border-radius:14px;padding:20px 24px;

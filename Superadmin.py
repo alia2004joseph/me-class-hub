@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 from database import SheetDatabaseManager
 from ai_engine import AIAdminAssistant
-from config import DEPARTMENTS, YEARS, DEPT_CODES, dept_color, dept_light, dept_name
+from config import get_departments, YEARS, get_dept_codes, dept_color, dept_light, dept_name, COLOUR_PALETTE, load_departments
 
 
 ADMIN_PRIMARY = "#0f172a"
@@ -97,7 +97,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
 
     total_students = len(df_all) if not df_all.empty else 0
     total_feedback = len(all_feedback)
-    total_depts    = len(DEPARTMENTS)
+    total_depts    = len(get_departments())
 
     # ── Banner ────────────────────────────────────────────────
     st.markdown(f"""
@@ -115,7 +115,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
 
     # ── Tabs ──────────────────────────────────────────────────
     tabs = st.tabs([
-        "🏠 Overview", "👑 Manage Reps",
+        "🏠 Overview", "🏛️ Departments", "👑 Manage Reps",
         "📢 Broadcast", "👥 All Students",
         "📬 All Feedback", "🤖 AI Insights"
     ])
@@ -126,8 +126,8 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
     with tabs[0]:
         st.markdown("### 🏠 Department Overview")
 
-        cols = st.columns(len(DEPARTMENTS))
-        for ci, (code, info) in enumerate(DEPARTMENTS.items()):
+        cols = st.columns(len(get_departments()))
+        for ci, (code, info) in enumerate(get_departments().items()):
             with cols[ci]:
                 dept_count = 0
                 if not df_all.empty:
@@ -174,7 +174,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
             rep_map[(d, y)] = n
 
         coverage_rows = []
-        for code in DEPT_CODES:
+        for code in get_dept_codes():
             for year in YEARS:
                 rep = rep_map.get((code, year), "")
                 coverage_rows.append({
@@ -185,10 +185,165 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
                 })
         st.dataframe(pd.DataFrame(coverage_rows), use_container_width=True)
 
+
+    # ════════════════════════════════════════
+    # 🏛️ DEPARTMENTS
+    # ════════════════════════════════════════
+    with tabs[1]:
+        st.markdown("### 🏛️ Manage Departments")
+        depts = get_departments()
+
+        # ── Add / Edit ───────────────────────────────────────
+        st.markdown("#### ➕ Add New Department")
+        with st.form("add_dept_form", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_code = st.text_input("Department Code", placeholder="e.g. CVL",
+                    help="Short uppercase code — cannot be changed later")
+                new_name = st.text_input("Full Name", placeholder="e.g. Civil Engineering")
+            with col2:
+                new_courses = st.text_input("Course Codes (comma separated)",
+                    placeholder="e.g. BCIV,BSTR,BENV")
+
+            # Colour palette picker
+            st.markdown("**Pick a Colour:**")
+            palette_cols = st.columns(len(COLOUR_PALETTE))
+            selected_color = COLOUR_PALETTE[0]["hex"]
+            selected_light = COLOUR_PALETTE[0]["light"]
+            for pi, pal in enumerate(COLOUR_PALETTE):
+                with palette_cols[pi]:
+                    st.markdown(f"""
+                    <div style="width:28px;height:28px;border-radius:50%;
+                        background:{pal['hex']};margin:0 auto;
+                        border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.2);"
+                        title="{pal['name']}"></div>
+                    <div style="font-size:0.6rem;text-align:center;color:#94a3b8;margin-top:2px;">
+                        {pal['name']}
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            colour_names = [p["name"] for p in COLOUR_PALETTE]
+            chosen_colour = st.selectbox("Select Colour", colour_names, key="new_dept_colour")
+            chosen_pal    = next(p for p in COLOUR_PALETTE if p["name"] == chosen_colour)
+
+            if st.form_submit_button("✅ Add Department", use_container_width=True):
+                if not new_code or not new_name or not new_courses:
+                    st.warning("Please fill in all fields.")
+                elif new_code.strip().upper() in depts:
+                    st.error(f"❌ Department code '{new_code.upper()}' already exists.")
+                else:
+                    with st.spinner("Adding..."):
+                        ok = db.add_department(
+                            new_code, new_name,
+                            chosen_pal["hex"], chosen_pal["light"], new_courses
+                        )
+                    if ok:
+                        st.success(f"✅ Department '{new_name}' added!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed. Check your GAS deployment.")
+
+        st.markdown('<div class="pro-divider"></div>', unsafe_allow_html=True)
+
+        # ── Current departments ──────────────────────────────
+        st.markdown("#### 📋 Current Departments")
+        if not depts:
+            st.info("No departments loaded.")
+        else:
+            for didx, (code, info) in enumerate(depts.items()):
+                color   = info.get("color", "#1a56db")
+                lcolor  = info.get("light", "#dbeafe")
+                dname   = info.get("name",  code)
+                courses = ", ".join(info.get("courses", []))
+
+                # Count students in this dept
+                student_count = 0
+                if not df_all.empty:
+                    dcol = next((c for c in ["Department","department","dept"]
+                                 if c in df_all.columns), None)
+                    if dcol:
+                        student_count = len(df_all[df_all[dcol] == code])
+
+                with st.expander(f"🏛️ {dname} ({code}) — {student_count} students"):
+                    # Edit form
+                    with st.form(f"edit_dept_{code}"):
+                        e_name    = st.text_input("Full Name",    value=dname)
+                        e_courses = st.text_input("Course Codes", value=courses,
+                            help="Comma separated, e.g. BMEC,BBPE")
+
+                        st.markdown("**Change Colour:**")
+                        e_colour_name = st.selectbox(
+                            "Colour", [p["name"] for p in COLOUR_PALETTE],
+                            index=next((i for i,p in enumerate(COLOUR_PALETTE)
+                                        if p["hex"]==color), 0),
+                            key=f"edit_col_{code}"
+                        )
+                        e_pal = next(p for p in COLOUR_PALETTE if p["name"] == e_colour_name)
+
+                        # Preview swatch
+                        st.markdown(f"""
+                        <div style="display:flex;align-items:center;gap:10px;margin:8px 0;">
+                            <div style="width:24px;height:24px;border-radius:50%;
+                                background:{e_pal['hex']};border:2px solid white;
+                                box-shadow:0 1px 4px rgba(0,0,0,0.2);"></div>
+                            <span style="font-size:0.85rem;color:#475569;">
+                                Preview: {e_pal['name']}
+                            </span>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        sc1, sc2 = st.columns(2)
+                        with sc1:
+                            if st.form_submit_button("💾 Save Changes", use_container_width=True):
+                                with st.spinner("Saving..."):
+                                    ok = db.update_department(
+                                        code, e_name, e_pal["hex"],
+                                        e_pal["light"], e_courses
+                                    )
+                                if ok:
+                                    st.success("✅ Updated!")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed.")
+                        with sc2:
+                            if st.form_submit_button("🗑️ Delete", use_container_width=True,
+                                                      type="secondary"):
+                                st.session_state[f"confirm_del_dept_{code}"] = True
+                                st.rerun()
+
+                    # Confirm delete
+                    if st.session_state.get(f"confirm_del_dept_{code}"):
+                        if student_count > 0:
+                            st.error(
+                                f"❌ Cannot delete **{dname}** — "
+                                f"**{student_count} student(s)** are registered here. "
+                                f"Transfer or remove all {code} students first."
+                            )
+                            if st.button("OK", key=f"ok_block_{code}"):
+                                st.session_state[f"confirm_del_dept_{code}"] = False
+                                st.rerun()
+                        else:
+                            st.warning(f"⚠️ Delete **{dname} ({code})**? This cannot be undone.")
+                            da, db_ = st.columns(2)
+                            with da:
+                                if st.button("✅ Yes, delete", key=f"yes_dept_{code}"):
+                                    with st.spinner("Deleting..."):
+                                        result = db.delete_department(code)
+                                    if result.get("status") == "success":
+                                        st.session_state[f"confirm_del_dept_{code}"] = False
+                                        st.success(f"✅ {dname} deleted.")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ {result.get('message','Failed')}")
+                            with db_:
+                                if st.button("❌ Cancel", key=f"no_dept_{code}"):
+                                    st.session_state[f"confirm_del_dept_{code}"] = False
+                                    st.rerun()
+
     # ════════════════════════════════════════
     # 👑 MANAGE REPS
     # ════════════════════════════════════════
-    with tabs[1]:
+    with tabs[2]:
         st.markdown("### 👑 Class Rep Accounts")
         st.info(
             "Create or update a rep account here. "
@@ -199,7 +354,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
         # ── Create / Update rep ──────────────────────────────
         st.markdown("#### ➕ Create or Update Rep Account")
         with st.form("assign_rep_form", clear_on_submit=True):
-            dept_opts = {f"{v['name']} ({k})": k for k, v in DEPARTMENTS.items()}
+            dept_opts = {f"{v['name']} ({k})": k for k, v in get_departments().items()}
             d_label   = st.selectbox("Department", list(dept_opts.keys()), key="ar_dept")
             sel_dept  = dept_opts[d_label]
             sel_year  = st.selectbox("Year Group", YEARS, key="ar_year")
@@ -248,7 +403,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
                 r_name      = str(rep.get("rep_name", rep.get("name", ""))).strip()
                 r_reg       = str(rep.get("rep_reg",  rep.get("reg",  ""))).strip()
                 r_has_pw    = rep.get("has_password", False)
-                color       = dept_color(r_dept_code) if r_dept_code in DEPARTMENTS else ADMIN_ACCENT
+                color       = dept_color(r_dept_code) if r_dept_code in get_departments() else ADMIN_ACCENT
 
                 col1, col2 = st.columns([4, 1])
                 with col1:
@@ -257,7 +412,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
                         <div>
                             <div class="rr-info">
                                 👑 {r_name}
-                                <span style="background:{dept_light(r_dept_code) if r_dept_code in DEPARTMENTS else ADMIN_LIGHT};
+                                <span style="background:{dept_light(r_dept_code) if r_dept_code in get_departments() else ADMIN_LIGHT};
                                     color:{color};font-size:0.7rem;font-weight:700;
                                     padding:2px 8px;border-radius:10px;margin-left:8px;">
                                     {r_dept_code} · {r_year}
@@ -343,7 +498,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
     # ════════════════════════════════════════
     # 📢 BROADCAST
     # ════════════════════════════════════════
-    with tabs[2]:
+    with tabs[3]:
         st.markdown("### 📢 Broadcast Announcement")
         st.info(
             "Broadcasts appear for **all students** across all departments and years, "
@@ -406,13 +561,13 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
     # ════════════════════════════════════════
     # 👥 ALL STUDENTS
     # ════════════════════════════════════════
-    with tabs[3]:
+    with tabs[4]:
         st.markdown("### 👥 All Registered Students")
         if df_all.empty:
             st.info("No students registered yet.")
         else:
             c1, c2, c3 = st.columns(3)
-            with c1: f_dept   = st.selectbox("Dept",   ["ALL"] + DEPT_CODES, key="f_dept")
+            with c1: f_dept   = st.selectbox("Dept",   ["ALL"] + get_dept_codes(), key="f_dept")
             with c2: f_year   = st.selectbox("Year",   ["ALL"] + YEARS,      key="f_year")
             with c3: f_search = st.text_input("Search name/reg",              key="f_search")
 
@@ -450,12 +605,12 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
     # ════════════════════════════════════════
     # 📬 ALL FEEDBACK
     # ════════════════════════════════════════
-    with tabs[4]:
+    with tabs[5]:
         st.markdown("### 📬 All Student Feedback")
         if not all_feedback:
             st.info("No feedback messages yet.")
         else:
-            f_dept2 = st.selectbox("Filter by Dept", ["ALL"] + DEPT_CODES, key="fb_dept")
+            f_dept2 = st.selectbox("Filter by Dept", ["ALL"] + get_dept_codes(), key="fb_dept")
 
             filtered_fb = all_feedback
             if f_dept2 != "ALL":
@@ -478,7 +633,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
                 dept_fb  = str(fb[5]).strip().upper() if len(fb) > 5 else "?"
                 year_fb  = str(fb[6]).strip()         if len(fb) > 6 else "?"
                 sc       = "#16a34a" if status.lower() == "reviewed" else "#d4820a"
-                color    = dept_color(dept_fb) if dept_fb in DEPARTMENTS else ADMIN_ACCENT
+                color    = dept_color(dept_fb) if dept_fb in get_departments() else ADMIN_ACCENT
 
                 st.markdown(f"""
                 <div style="background:white;border-radius:10px;padding:12px 16px;
@@ -486,7 +641,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
                     <div style="font-size:0.75rem;color:#94a3b8;">
                         👤 <strong>{name}</strong> · {reg}
                         &nbsp;·&nbsp;
-                        <span style="background:{dept_color(dept_fb) if dept_fb in DEPARTMENTS else '#e2e8f7'};
+                        <span style="background:{dept_color(dept_fb) if dept_fb in get_departments() else '#e2e8f7'};
                             color:white;font-size:0.68rem;font-weight:700;
                             padding:1px 7px;border-radius:8px;">{dept_fb}</span>
                         {year_fb} · 🕐 {ts}
@@ -499,7 +654,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
     # ════════════════════════════════════════
     # 🤖 AI INSIGHTS
     # ════════════════════════════════════════
-    with tabs[5]:
+    with tabs[6]:
         st.markdown("### 🤖 AI-Powered Insights")
 
         insight = st.radio("Choose:", [
@@ -514,7 +669,7 @@ def render_superadmin_interface(db: SheetDatabaseManager, ai_admin: AIAdminAssis
                 st.markdown(result)
 
         elif insight == "📬 Feedback Summary":
-            f_dept3 = st.selectbox("Scope", ["ALL"] + DEPT_CODES, key="ai_fb_dept")
+            f_dept3 = st.selectbox("Scope", ["ALL"] + get_dept_codes(), key="ai_fb_dept")
             if st.button("📬 Summarize Feedback", use_container_width=True):
                 if f_dept3 == "ALL":
                     fb_scope = all_feedback
