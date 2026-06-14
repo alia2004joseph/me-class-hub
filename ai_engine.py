@@ -138,45 +138,59 @@ def try_cloudflare(contents, token, account_id):
 # FALLBACK MANAGER
 # ─────────────────────────────────────────────
 def _call_with_retry(model: str, contents: str, config) -> str:
+    # ── Try ALL Gemini keys in rotation ─────────────────────
     if _key_manager.has_keys():
-        try:
-            return try_gemini(model, contents, config)
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                _key_manager.rotate()
-            else:
-                print(f"[Gemini error] {e}")
+        for attempt in range(_key_manager.total_keys()):
+            try:
+                return try_gemini(model, contents, config)
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
+                    print(f"[Gemini key {_key_manager.current_index}] Quota hit, rotating...")
+                    _key_manager.rotate()
+                    continue
+                else:
+                    print(f"[Gemini error] {e}")
+                    break
 
+    # ── Fallback: Groq ───────────────────────────────────────
     groq_key = st.secrets.get("GROQ_API_KEY", "")
     if groq_key:
         try:
+            print("[AI] Trying Groq...")
             return try_groq(contents, groq_key)
         except Exception as e:
             print(f"[Groq error] {e}")
 
+    # ── Fallback: Mistral ────────────────────────────────────
     mistral_key = st.secrets.get("MISTRAL_API_KEY", "")
     if mistral_key:
         try:
+            print("[AI] Trying Mistral...")
             return try_mistral(contents, mistral_key)
         except Exception as e:
             print(f"[Mistral error] {e}")
 
+    # ── Fallback: HuggingFace ────────────────────────────────
     hf_token = st.secrets.get("HUGGINGFACE_TOKEN", "")
     if hf_token:
         try:
+            print("[AI] Trying HuggingFace...")
             return try_huggingface(contents, hf_token)
         except Exception as e:
             print(f"[HF error] {e}")
 
+    # ── Fallback: Cloudflare ─────────────────────────────────
     cf_token   = st.secrets.get("CLOUDFLARE_TOKEN", "")
     cf_account = st.secrets.get("CLOUDFLARE_ACCOUNT_ID", "")
     if cf_token and cf_account:
         try:
+            print("[AI] Trying Cloudflare...")
             return try_cloudflare(contents, cf_token, cf_account)
         except Exception as e:
             print(f"[Cloudflare error] {e}")
 
-    return "⚠️ No AI provider available right now."
+    return "⚠️ All AI providers are currently unavailable. Please check your API keys in secrets.toml."
 
 # ─────────────────────────────────────────────
 # PDF TEXT EXTRACTION
@@ -259,18 +273,20 @@ class AIStudyAssistant:
             self._record_request(student_reg)
 
         prompt = (
-            f"Provide a COMPLETE and detailed summary of '{file_name}'.\n\n"
-            f"## 📘 Summary of '{file_name}'\n\n"
+            f"Provide a COMPLETE and detailed summary of this document.\n\n"
+            f"Structure your response using these sections:\n"
             f"### 1. Main Topic\n"
             f"### 2. Key Concepts\n"
             f"### 3. Important Formulas & Definitions\n"
             f"### 4. Chapter/Section Breakdown\n"
             f"### 5. Study Tips\n\n"
+            f"Do NOT repeat the file name or add a title heading — the app already shows it.\n"
+            f"Be thorough and complete every section fully.\n\n"
             f"Document content:\n{pdf_text}"
         )
         config = types.GenerateContentConfig(
             system_instruction=STUDENT_SYSTEM_PROMPT,
-            temperature=0.3, max_output_tokens=3000)
+            temperature=0.3, max_output_tokens=6000)
         return _call_with_retry(STUDENT_MODEL, prompt, config)
 
     def ask_ai(
@@ -309,7 +325,7 @@ class AIStudyAssistant:
         )
         config = types.GenerateContentConfig(
             system_instruction=STUDENT_SYSTEM_PROMPT,
-            temperature=0.4, max_output_tokens=3000)
+            temperature=0.4, max_output_tokens=6000)
         return _call_with_retry(STUDENT_MODEL, full_prompt, config)
 
     def find_formula(
@@ -350,7 +366,99 @@ class AIStudyAssistant:
         )
         config = types.GenerateContentConfig(
             system_instruction=STUDENT_SYSTEM_PROMPT,
-            temperature=0.4, max_output_tokens=2000)
+            temperature=0.4, max_output_tokens=4000)
+        return _call_with_retry(STUDENT_MODEL, prompt, config)
+
+
+    def chat_with_context(
+        self,
+        question: str,
+        chat_history: list,
+        student_context: str,
+        pdf_text: str = "",
+        file_name: str = "",
+        student_reg: str = ""
+    ) -> str:
+        """
+        Context-aware AI chat — knows the student's profile,
+        announcements, timetable, materials, feedback and group.
+        """
+        if student_reg:
+            ok, wait = self._check_cooldown(student_reg)
+            if not ok:
+                return f"⏳ Please wait {wait} seconds before asking again."
+            self._record_request(student_reg)
+
+        doc_block = ""
+        if pdf_text.strip():
+            doc_block = (
+                f"\n=== SELECTED MATERIAL: {file_name} ===\n"
+                f"{pdf_text[:6000]}\n"
+                f"=== END OF MATERIAL ===\n"
+            )
+
+        history_block = ""
+        if chat_history:
+            for turn in chat_history[-6:]:
+                role = "Student" if turn["role"] == "user" else "Assistant"
+                history_block += f"{role}: {turn['content']}\n"
+            history_block = f"\n=== RECENT CONVERSATION ===\n{history_block}\n"
+
+        full_prompt = (
+            f"{student_context}"
+            f"{doc_block}"
+            f"{history_block}"
+            f"\n=== STUDENT QUESTION ===\n{question}\n\n"
+            f"Answer using the student context above. Be personal, friendly and accurate. "
+            f"If the question is about their class data (announcements, timetable, materials, "
+            f"group, rep, feedback), answer directly from the context. "
+            f"For academic questions, use your full knowledge."
+        )
+        config = types.GenerateContentConfig(
+            system_instruction=(
+                "You are a smart, friendly academic assistant embedded in a university student portal. "
+                "You have full knowledge of the student's profile, timetable, announcements, materials, "
+                "feedback status, group members, and class rep details. "
+                "Always personalize your responses using the student's name and their specific data. "
+                "Never say you lack access to their information — you have it all in context. "
+                "For class data questions, answer directly and confidently. "
+                "For academic questions, be thorough and educational. "
+                "Keep responses clear, structured and mobile-friendly."
+            ),
+            temperature=0.4, max_output_tokens=6000
+        )
+        return _call_with_retry(STUDENT_MODEL, full_prompt, config)
+
+    def generate_revision_questions(
+        self,
+        topic: str,
+        pdf_text: str = "",
+        file_name: str = "",
+        num_questions: int = 10,
+        student_reg: str = ""
+    ) -> str:
+        """Generate revision questions from course material or topic."""
+        if student_reg:
+            ok, wait = self._check_cooldown(student_reg)
+            if not ok:
+                return f"⏳ Please wait {wait} seconds."
+            self._record_request(student_reg)
+
+        source = f"from '{file_name}':\n{pdf_text[:6000]}" if pdf_text.strip() else f"on the topic: {topic}"
+        prompt = (
+            f"Generate {num_questions} university-level revision questions {source}.\n\n"
+            f"Include a mix of:\n"
+            f"- 4 Multiple choice questions (with 4 options and the correct answer)\n"
+            f"- 3 Short answer questions\n"
+            f"- 2 Calculation/problem-solving questions (if applicable)\n"
+            f"- 1 Essay/explain question\n\n"
+            f"For each question, provide the answer or model answer below it.\n"
+            f"Number each question clearly."
+        )
+        config = types.GenerateContentConfig(
+            system_instruction=STUDENT_SYSTEM_PROMPT,
+            temperature=0.5, max_output_tokens=6000
+        )
         return _call_with_retry(STUDENT_MODEL, prompt, config)
 
 

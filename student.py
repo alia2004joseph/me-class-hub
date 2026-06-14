@@ -129,6 +129,7 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
         "ai_selected_file":   "",
         "ai_summary_shown":   False,
         "ai_summary_text":    "",
+        "ai_quick_q":         "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -933,15 +934,136 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
     # ════════════════════════════════════════
     with tab_ai:
         from ai_engine import extract_pdf_text
+        from datetime import datetime
+
+        # ── Build full student context for aware AI ───────────
+        def build_student_context():
+            from config import dept_name as _dept_name
+            today     = datetime.now().strftime("%A, %d %B %Y")
+            tomorrow  = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"][
+                (datetime.now().weekday() + 1) % 7]
+
+            # Announcements text
+            ann_lines = ""
+            for ann in all_anns[:15]:
+                if isinstance(ann, dict):
+                    ann_lines += f"  [{ann.get('priority','Normal')}] {ann.get('timestamp','')} — {ann.get('text','')[:200]}\n"
+
+            # Timetable text
+            tt_lines = ""
+            timetable_data = db.fetch_timetable(dept=s_dept, year=s_year)
+            by_day = {}
+            for entry in timetable_data:
+                day = entry.get("day","")
+                by_day.setdefault(day, []).append(entry)
+            days_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            for day in days_order:
+                if day in by_day:
+                    tt_lines += f"  {day}:\n"
+                    for e in sorted(by_day[day], key=lambda x: x.get("time","")):
+                        tt_lines += f"    - {e.get('time','')} | {e.get('course','')} | {e.get('lecturer','')} | {e.get('type','Weekly')}\n"
+
+            # Materials text
+            mat_lines = ""
+            for m in materials_list[:20]:
+                mat_lines += f"  - {m.get('name','')} (URL: {m.get('url','')})\n"
+
+            # Feedback status
+            fb_lines = ""
+            my_feedback = db.fetch_feedback(dept=s_dept, year=s_year)
+            for fb in my_feedback:
+                if isinstance(fb, list) and len(fb) >= 5:
+                    if str(fb[1]).strip().upper() == s_reg.upper():
+                        fb_lines += f"  [{fb[3]}] {fb[0]} — {str(fb[4])[:100]}\n"
+
+            # Rep replies
+            reply_lines = ""
+            for r in my_rep_replies[:10]:
+                if isinstance(r, dict):
+                    reply_lines += f"  [{r.get('read_status','Unread')}] {r.get('timestamp','')} — {str(r.get('message',''))[:100]}\n"
+
+            # Group members
+            group_lines = ""
+            if not df_profiles.empty and "Assigned Group" in df_profiles.columns:
+                group_members = df_profiles[df_profiles["Assigned Group"] == s_group]
+                for _, m in group_members.iterrows():
+                    marker = " (YOU)" if m.get("Reg Number","") == s_reg else ""
+                    group_lines += f"  - {m.get('Student Name','')} | {m.get('Reg Number','')} | {m.get('Course Code','')}{marker}\n"
+
+            # Rep info
+            rep_info = ""
+            reps = db.fetch_reps()
+            
+            for rep in reps:
+                if isinstance(rep, dict):
+                    rep_dept = str(rep.get('dept', '')).strip().upper()
+                    rep_year = str(rep.get('year', '')).strip()
+                    if rep_dept == s_dept.upper() and rep_year == s_year:
+                        rep_name = rep.get('rep_name') or 'Unknown'
+                        rep_reg  = rep.get('rep_reg') or ''
+                        rep_info = f"  Name: {rep_name} | Reg: {rep_reg} | Year: {rep_year}\\n"
+                        break
+            return f"""=== TODAY ===
+  {today}
+  Tomorrow: {tomorrow}
+
+=== STUDENT PROFILE ===
+  Name: {s_name}
+  Reg Number: {s_reg}
+  Department: {s_dept_name} ({s_dept})
+  Year: {s_year}
+  Course Code: {s_course}
+  Group: {s_group}
+
+=== MY TIMETABLE ===
+{tt_lines if tt_lines else "  No timetable entries yet."}
+
+=== CLASS ANNOUNCEMENTS (Latest 15) ===
+{ann_lines if ann_lines else "  No announcements yet."}
+
+=== AVAILABLE MATERIALS ===
+{mat_lines if mat_lines else "  No materials uploaded yet."}
+
+=== MY FEEDBACK STATUS ===
+{fb_lines if fb_lines else "  No feedback sent yet."}
+
+=== REP REPLIES TO ME ===
+{reply_lines if reply_lines else "  No replies yet."}
+
+=== MY GROUP MEMBERS ({s_group}) ===
+{group_lines if group_lines else "  No group members found."}
+
+=== MY CLASS REP ===
+{rep_info if rep_info else "  No Class Rep assigned yet."}
+"""
 
         if not st.session_state.show_ai_tab:
             st.markdown(f"""
             <div class="welcome-banner" style="text-align:center;">
                 <div style="font-size:2.5rem;margin-bottom:10px;">🤖</div>
                 <h2>AI Study Assistant</h2>
-                <p>Ask academic questions or select a course material for AI-powered help.</p>
+                <p>Ask about your timetable, announcements, materials, group — or any academic question.</p>
             </div>
             """, unsafe_allow_html=True)
+
+            # Quick prompts
+            st.markdown("**💡 Try asking:**")
+            quick_cols = st.columns(2)
+            quick_prompts = [
+                "What do I have tomorrow?",
+                "What announcements did I miss?",
+                "Who is in my group?",
+                "Who is my class rep?",
+                "Show my feedback status",
+                "What materials are available?",
+            ]
+            for i, qp in enumerate(quick_prompts):
+                with quick_cols[i % 2]:
+                    if st.button(qp, key=f"qp_{i}", use_container_width=True):
+                        st.session_state.show_ai_tab   = True
+                        st.session_state.ai_quick_q    = qp
+                        st.rerun()
+
             if st.button("▶ Start AI Assistant", use_container_width=True):
                 st.session_state.show_ai_tab = True
                 st.rerun()
@@ -952,63 +1074,109 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
                 if st.button("✖ Close", use_container_width=True):
                     for k in ["ai_chat_history","ai_summary_shown",
                               "ai_pdf_text","ai_selected_file",
-                              "ai_summary_text","show_ai_tab"]:
+                              "ai_summary_text","show_ai_tab","ai_quick_q"]:
                         st.session_state[k] = [] if k=="ai_chat_history" else                                               (False if "shown" in k or "tab" in k else "")
                     st.rerun()
 
-            st.markdown(f'<div class="msg-info-card">💡 Select a course material or ask any academic question.</div>', unsafe_allow_html=True)
+            # ── Mode selector ─────────────────────────────────
+            ai_mode = st.radio(
+                "Mode:", ["💬 Class Assistant", "📚 Study Material"],
+                horizontal=True, key="ai_mode_select"
+            )
 
-            mat_names     = ["— No material (general Q&A) —"] + [m.get("name","") for m in materials_list]
-            selected_name = st.selectbox("📄 Select a course material:", mat_names)
+            # ── STUDY MATERIAL MODE ───────────────────────────
+            if ai_mode == "📚 Study Material":
+                st.markdown(f'<div class="msg-info-card">💡 Select a course material for AI-powered help.</div>', unsafe_allow_html=True)
 
-            if selected_name != "— No material (general Q&A) —":
-                sel_mat = next((m for m in materials_list if m.get("name") == selected_name), None)
-                if sel_mat:
-                    file_url  = sel_mat.get("url","")
-                    file_name = sel_mat.get("name","")
-                    if st.session_state.ai_selected_file != file_name:
-                        st.session_state.ai_selected_file = file_name
+                mat_names     = ["— No material (general Q&A) —"] + [m.get("name","") for m in materials_list]
+                selected_name = st.selectbox("📄 Select a course material:", mat_names)
+
+                if selected_name != "— No material (general Q&A) —":
+                    sel_mat = next((m for m in materials_list if m.get("name") == selected_name), None)
+                    if sel_mat:
+                        file_url  = sel_mat.get("url","")
+                        file_name = sel_mat.get("name","")
+                        if st.session_state.ai_selected_file != file_name:
+                            st.session_state.ai_selected_file = file_name
+                            st.session_state.ai_summary_shown = False
+                            st.session_state.ai_summary_text  = ""
+                            st.session_state.ai_chat_history  = []
+                            with st.spinner("📖 Reading material..."):
+                                st.session_state.ai_pdf_text = extract_pdf_text(file_url, file_name)
+                        if not st.session_state.ai_summary_shown:
+                            with st.spinner("✍️ Generating summary..."):
+                                summary = ai_study.summarize_material(
+                                    st.session_state.ai_pdf_text, file_name, student_reg=s_reg
+                                )
+                            st.session_state.ai_summary_text  = summary
+                            st.session_state.ai_summary_shown = True
+
+                        if st.session_state.get("ai_summary_text"):
+                            st.markdown(
+                                f'<div class="ann-card"><span class="ann-badge badge-normal">'
+                                f'📋 SUMMARY</span><div>{st.session_state.ai_summary_text}</div></div>',
+                                unsafe_allow_html=True
+                            )
+
+                        # Revision questions button
+                        if st.button("🎯 Generate Revision Questions", use_container_width=True):
+                            with st.spinner("Generating questions..."):
+                                qs = ai_study.generate_revision_questions(
+                                    topic=file_name,
+                                    pdf_text=st.session_state.ai_pdf_text,
+                                    file_name=file_name,
+                                    student_reg=s_reg
+                                )
+                            st.markdown(qs)
+                else:
+                    if st.session_state.ai_selected_file:
+                        st.session_state.ai_selected_file = ""
+                        st.session_state.ai_pdf_text      = ""
                         st.session_state.ai_summary_shown = False
                         st.session_state.ai_summary_text  = ""
                         st.session_state.ai_chat_history  = []
-                        with st.spinner("📖 Reading material..."):
-                            st.session_state.ai_pdf_text = extract_pdf_text(file_url, file_name)
-                    if not st.session_state.ai_summary_shown:
-                        with st.spinner("✍️ Generating summary..."):
-                            summary = ai_study.summarize_material(
-                                st.session_state.ai_pdf_text, file_name, student_reg=s_reg
-                            )
-                        # Store summary separately — NOT in chat history to avoid duplication
-                        st.session_state.ai_summary_text  = summary
-                        st.session_state.ai_summary_shown = True
 
-                    # Always render the summary from session state (not chat history)
-                    if st.session_state.get("ai_summary_text"):
-                        st.markdown(
-                            f'<div class="ann-card"><span class="ann-badge badge-normal">'
-                            f'📋 SUMMARY</span><div>{st.session_state.ai_summary_text}</div></div>',
-                            unsafe_allow_html=True
-                        )
+            # ── CLASS ASSISTANT MODE ──────────────────────────
             else:
-                if st.session_state.ai_selected_file:
-                    st.session_state.ai_selected_file = ""
-                    st.session_state.ai_pdf_text      = ""
-                    st.session_state.ai_summary_shown = False
-                    st.session_state.ai_summary_text  = ""
-                    st.session_state.ai_chat_history  = []
+                st.markdown(f'<div class="msg-info-card">💡 Ask about your timetable, announcements, materials, group, rep, or any academic topic.</div>', unsafe_allow_html=True)
 
             st.markdown('<div class="pro-divider"></div>', unsafe_allow_html=True)
 
+            # ── Chat history display ──────────────────────────
             for turn in st.session_state.ai_chat_history:
                 if turn["role"] == "user":
                     st.markdown(f'<div style="background:{light};border-radius:10px;padding:10px 14px;margin-bottom:8px;margin-left:20%;text-align:right;"><div style="font-size:0.78rem;color:{primary};font-weight:600;">You</div><div style="font-size:0.9rem;">{turn["content"]}</div></div>', unsafe_allow_html=True)
                 else:
                     st.markdown(f'<div style="background:white;border:1px solid #e2e8f7;border-radius:10px;padding:10px 14px;margin-bottom:8px;margin-right:20%;"><div style="font-size:0.78rem;color:{primary};font-weight:600;">🤖 AI</div><div style="font-size:0.9rem;">{turn["content"]}</div></div>', unsafe_allow_html=True)
 
+            # ── Handle quick prompt ───────────────────────────
+            if st.session_state.get("ai_quick_q"):
+                quick_q = st.session_state.ai_quick_q
+                st.session_state.ai_quick_q = ""
+                with st.spinner("🤖 Thinking..."):
+                    ctx    = build_student_context()
+                    answer = ai_study.chat_with_context(
+                        question       = quick_q,
+                        chat_history   = st.session_state.ai_chat_history,
+                        student_context= ctx,
+                        pdf_text       = st.session_state.ai_pdf_text,
+                        file_name      = st.session_state.ai_selected_file,
+                        student_reg    = s_reg
+                    )
+                st.session_state.ai_chat_history.append({"role":"user",      "content": quick_q})
+                st.session_state.ai_chat_history.append({"role":"assistant", "content": answer})
+                st.rerun()
+
+            # ── Chat input ────────────────────────────────────
             with st.form("ai_chat_form", clear_on_submit=True):
+                placeholder = (
+                    "Ask about your timetable, announcements, group, rep, materials..."
+                    if ai_mode == "💬 Class Assistant"
+                    else "Ask any academic question about the selected material..."
+                )
                 user_question = st.text_area(
                     "Your question:", height=90, label_visibility="collapsed",
-                    placeholder="Ask any academic question..."
+                    placeholder=placeholder
                 )
                 c1, c2 = st.columns([3,1])
                 with c1: send_btn  = st.form_submit_button("📨 Ask AI", use_container_width=True)
@@ -1016,15 +1184,26 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
 
                 if send_btn and user_question.strip():
                     with st.spinner("🤖 Thinking..."):
-                        answer = ai_study.ask_ai(
-                            question=user_question.strip(),
-                            chat_history=st.session_state.ai_chat_history,
-                            pdf_text=st.session_state.ai_pdf_text,
-                            file_name=st.session_state.ai_selected_file,
-                            student_reg=s_reg
-                        )
-                    st.session_state.ai_chat_history.append({"role":"user","content":user_question.strip()})
-                    st.session_state.ai_chat_history.append({"role":"assistant","content":answer})
+                        if ai_mode == "💬 Class Assistant":
+                            ctx    = build_student_context()
+                            answer = ai_study.chat_with_context(
+                                question        = user_question.strip(),
+                                chat_history    = st.session_state.ai_chat_history,
+                                student_context = ctx,
+                                pdf_text        = st.session_state.ai_pdf_text,
+                                file_name       = st.session_state.ai_selected_file,
+                                student_reg     = s_reg
+                            )
+                        else:
+                            answer = ai_study.ask_ai(
+                                question     = user_question.strip(),
+                                chat_history = st.session_state.ai_chat_history,
+                                pdf_text     = st.session_state.ai_pdf_text,
+                                file_name    = st.session_state.ai_selected_file,
+                                student_reg  = s_reg
+                            )
+                    st.session_state.ai_chat_history.append({"role":"user",      "content": user_question.strip()})
+                    st.session_state.ai_chat_history.append({"role":"assistant", "content": answer})
                     st.rerun()
 
                 if clear_btn:
@@ -1032,7 +1211,6 @@ def render_student_interface(db: SheetDatabaseManager, ai_study, df_profiles):
                     st.session_state.ai_summary_shown = False
                     st.session_state.ai_summary_text  = ""
                     st.rerun()
-
     # ── Logout ────────────────────────────────────────────────
     st.markdown('<div class="pro-divider"></div>', unsafe_allow_html=True)
     if st.button("🔒 Log Out"):
